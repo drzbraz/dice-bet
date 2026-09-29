@@ -95,7 +95,15 @@ export class DiceClient {
           ),
         );
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        // wasClean=false / code 1006 means the connection dropped without a
+        // WS close handshake (e.g. a network blip or a server-side
+        // deadline), as opposed to a normal close from disconnect() or a
+        // server-initiated close -- worth telling apart when diagnosing an
+        // unexpected disconnect.
+        if (!event.wasClean) {
+          console.info(`[DiceClient] connection dropped (code ${event.code})`);
+        }
         this.onStateChange("closed");
         this.failAll(new DiceError("CONNECTION_CLOSED", "Connection to the game server was lost."));
       };
