@@ -44,13 +44,16 @@
   --card-foreground: oklch(0.28 0.05 45);
   --popover: oklch(1 0.004 90);
   --popover-foreground: oklch(0.28 0.05 45);
-  --primary: oklch(0.68 0.17 38);
+  /* Brand colors matched to vertsaplay.pt (Vertsa Play), read from its own
+     --color-primary/--color-secondary/--color-accent CSS custom
+     properties: primary orange, secondary/accent purple. */
+  --primary: #ff7821;
   --primary-foreground: oklch(0.99 0.01 90);
   --secondary: oklch(0.94 0.03 85);
   --secondary-foreground: oklch(0.34 0.06 45);
   --muted: oklch(0.955 0.018 85);
   --muted-foreground: oklch(0.52 0.03 60);
-  --accent: oklch(0.62 0.12 195);
+  --accent: #7b3ddc;
   --accent-foreground: oklch(0.99 0.01 90);
   --destructive: oklch(0.58 0.2 22);
   --destructive-foreground: oklch(0.99 0.01 90);
@@ -58,9 +61,9 @@
   --success-foreground: oklch(0.99 0.01 90);
   --border: oklch(0.9 0.025 80);
   --input: oklch(0.9 0.025 80);
-  --ring: oklch(0.68 0.17 38);
+  --ring: #ff7821;
 
-  --gradient-warm: linear-gradient(135deg, oklch(0.72 0.16 55), oklch(0.66 0.18 25));
+  --gradient-warm: linear-gradient(135deg, #ff9967, #ff7821);
   --gradient-table: radial-gradient(
     120% 100% at 50% 0%,
     oklch(0.97 0.03 80) 0%,
