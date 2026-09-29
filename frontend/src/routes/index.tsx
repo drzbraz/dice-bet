@@ -59,6 +59,7 @@ function GamePage() {
   const [message, setMessage] = useState<{ tone: "error" | "info"; text: string } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const clientRef = useRef<DiceClient | null>(null);
+  const lastClientIdRef = useRef<string | null>(null);
 
   const connected = state === "open";
 
@@ -77,7 +78,12 @@ function GamePage() {
       client.onStateChange = setState;
       clientRef.current = client;
       await client.connect();
-      const wallet = await client.getWallet(clientId.trim());
+      const trimmedClientId = clientId.trim();
+      const wallet = await client.getWallet(trimmedClientId);
+      if (lastClientIdRef.current !== null && lastClientIdRef.current !== trimmedClientId) {
+        setHistory([]);
+      }
+      lastClientIdRef.current = trimmedClientId;
       setBalance(wallet.balance);
       setCurrency(wallet.currency || "EUR");
       setPlay(null);
