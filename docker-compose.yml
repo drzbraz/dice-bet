@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dicebet
+      POSTGRES_PASSWORD: dicebet
+      POSTGRES_DB: dicebet
+    ports:
+      # Host port 5433 (not the default 5432) to avoid clashing with a
+      # locally installed Postgres; the app always talks to the postgres
+      # service over the internal Docker network on 5432 regardless.
+      - "5433:5432"
+    volumes:
+      - dicebet-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dicebet -d dicebet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://dicebet:dicebet@postgres:5432/dicebet?sslmode=disable
+      DB_MAX_CONNS: 10
+      RUN_MIGRATIONS: "true"
+      MIN_BET: 100
+      MAX_BET: 1000000
+      READ_TIMEOUT: 15s
+      WRITE_TIMEOUT: 15s
+      WS_PING_INTERVAL: 30s
+      WS_MAX_MESSAGE_BYTES: 4096
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  dicebet-postgres-data:

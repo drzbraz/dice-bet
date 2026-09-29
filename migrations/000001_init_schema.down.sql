@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TABLE IF EXISTS wallet_transactions;
+DROP TABLE IF EXISTS plays;
+DROP TABLE IF EXISTS wallets;
+DROP TABLE IF EXISTS clients;

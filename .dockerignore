@@ -1,0 +1,11 @@
+.git/
+bin/
+dist/
+*.test
+coverage.out
+coverage.html
+.idea/
+.vscode/
+.env
+postman/
+README.md
