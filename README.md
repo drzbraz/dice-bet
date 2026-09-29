@@ -75,7 +75,7 @@ erDiagram
         timestamptz created_at
     }
     WALLETS {
-        text client_id PK_FK
+        text client_id PK
         bigint balance
         char3 currency
         bigint version
