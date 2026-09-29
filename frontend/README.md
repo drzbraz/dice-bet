@@ -1,28 +1,15 @@
 # Dice Bet UI
 
-build a client frontend to support this backend. Friendly Ui
+A friendly client for the [dice-bet](../README.md) backend: bet on whether the next roll is even or odd, watch it roll, collect your winnings.
 
-Check the backend here https://github.com/drzbraz/dice-bet
-
-this is the challenge
-
-This project was built with [Lovable](https://lovable.dev).
-
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/f567e235-918c-4d05-9fe4-02bd707557a2).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+Originally scaffolded with [Lovable](https://lovable.dev); it now lives as a normal part of the `dice-bet` monorepo and is no longer connected to a separate Lovable-synced repository — changes here are committed and pushed like any other part of this repo, not synced back to a Lovable project.
 
 ## Development
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
 ```sh
-git clone <this-repository-url>
-cd <repository-name>
+cd frontend
 npm i
-npm run dev
+npm run dev   # http://localhost:5173
 ```
+
+Requires the backend running (`docker compose up` or `make run` from the repo root — see the [main README](../README.md#how-to-run)) for anything beyond the empty shell to work; the "Game server" field in the UI points at it (`ws://localhost:8080/ws` by default, overridable per-session there or at build time via `VITE_DICE_SERVER_URL`, see `.env.example`).

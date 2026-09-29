@@ -141,6 +141,8 @@ internal/
 migrations/       embedded SQL migrations (golang-migrate)
 test/e2e/         full-stack tests against a real Postgres (testcontainers): happy path + concurrency proofs
 postman/          Postman collection
+frontend/         React/TanStack Start client (originally scaffolded with Lovable, now a normal
+                   part of this monorepo — see "Frontend" below)
 ```
 
 ### SOLID in this codebase
@@ -239,6 +241,18 @@ cp .env.example .env   # adjust DATABASE_URL etc.
 make run                # loads .env, applies migrations (RUN_MIGRATIONS=true by default), starts the server
 ```
 
+## Frontend
+
+`frontend/` is a friendly React/TanStack Start client for this backend (originally scaffolded with [Lovable](https://lovable.dev), now a normal part of this repo — see `frontend/README.md`/`frontend/AGENTS.md` for what it still carries over from that). It talks to the backend purely over the WebSocket contract above.
+
+```sh
+cd frontend
+npm i
+npm run dev   # http://localhost:5173
+```
+
+The dev server defaults to `:5173` specifically so it doesn't collide with the backend's own default `:8080` (see `frontend/vite.config.ts`) — both can run side by side locally. The UI's "Game server" field lets you point it at any backend URL at runtime; its build-time default is `ws://localhost:8080/ws`, overridable via `VITE_DICE_SERVER_URL` (see `frontend/.env.example`) for pointing a deployed build at a deployed backend.
+
 ## How to test
 
 ```sh
@@ -303,3 +317,5 @@ websocat ws://localhost:8080/ws
 ## Configuration
 
 All via environment variables (see `.env.example` for defaults): `PORT`, `DATABASE_URL`, `DB_MAX_CONNS`, `MIN_BET`, `MAX_BET`, `RUN_MIGRATIONS`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `WS_PING_INTERVAL`, `WS_MAX_MESSAGE_BYTES`.
+
+`READ_TIMEOUT`/`WRITE_TIMEOUT` govern the plain `http.Server` only (the HTTP mirror's per-request timeouts); they do **not** apply to the WebSocket connection's read deadline, which is instead derived as `2 × WS_PING_INTERVAL` in `cmd/server/main.go`. Reusing the HTTP timeout for WS idle tolerance was a real bug caught during integration testing: with the defaults at the time (`READ_TIMEOUT=15s`, `WS_PING_INTERVAL=30s`), every idle WS connection's read deadline expired before its first keepalive ping could ever arrive, silently killing the connection after ~15s of inactivity (e.g. a player sitting on an open round). Keep this in mind if you ever change `WS_PING_INTERVAL`: the read deadline tracks it automatically, but a *very* long ping interval still means a *very* long tolerance for a genuinely dead connection going undetected.

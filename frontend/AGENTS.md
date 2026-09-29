@@ -1,10 +1,1 @@
-<!-- LOVABLE:BEGIN -->
-> [!IMPORTANT]
-> This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
-> published git history — force pushing, or rebasing/amending/squashing commits
-> that are already pushed — as it rewrites history on Lovable's side and the
-> user will likely lose their project history.
->
-> Commits you push to the connected branch sync back to Lovable and show up in
-> the editor, so keep the branch in a working state.
-<!-- LOVABLE:END -->
+This project was originally scaffolded with [Lovable](https://lovable.dev) and lived as a separate Lovable-connected repository. It has since been folded into the `dice-bet` monorepo and is no longer connected to Lovable: it's tracked and pushed as a normal part of this repository's own git history, with no external sync to keep in a working state.
