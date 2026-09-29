@@ -77,8 +77,14 @@ func run(logger *slog.Logger) error {
 	wsCfg := ws.DefaultConfig()
 	wsCfg.MaxMessageBytes = cfg.WSMaxMessageBytes
 	wsCfg.PingInterval = cfg.WSPingInterval
-	wsCfg.ReadTimeout = cfg.ReadTimeout
 	wsCfg.WriteTimeout = cfg.WriteTimeout
+	// Deliberately NOT cfg.ReadTimeout: that's an HTTP request timeout, a
+	// different concern from a WS connection's idle tolerance. A player
+	// sitting on an open round with no traffic is normal; only pings keep
+	// the connection alive, so the read deadline must comfortably outlast
+	// the ping interval or every idle connection gets killed before its
+	// first ping ever arrives.
+	wsCfg.ReadTimeout = 2 * cfg.WSPingInterval
 	wsServer := ws.NewServer(wsRouter, wsCfg, logger)
 
 	httpController := httptransport.NewController(walletSvc, gameSvc)
