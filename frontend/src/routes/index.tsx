@@ -227,10 +227,12 @@ function GamePage() {
             </p>
           </div>
 
-          <Die value={play?.rolledNumber ?? null} rolling={rolling} />
+          <Die value={play?.rolledNumber ?? null} rolling={rolling} won={play?.result === "WIN"} />
 
           {play ? (
-            <div className="animate-pop-in text-center">
+            <div
+              className={`text-center ${play.result === "WIN" ? "animate-win-pop" : "animate-pop-in"}`}
+            >
               <p
                 className={`text-2xl font-bold ${play.result === "WIN" ? "text-success" : "text-destructive"}`}
               >
