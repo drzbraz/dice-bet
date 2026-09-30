@@ -4,6 +4,8 @@ A production-quality Go backend for a dice game where a player bets whether the 
 
 **Contents**: [Overview](#overview) · [Architecture](#architecture) · [Read freshness under replica lag](#read-freshness-under-replica-lag-wallet-balance-cache) · [Domain state machine](#domain-state-machine-play) · [WebSocket contract](#websocket-contract) · [HTTP mirror](#http-mirror-for-postman) · [Prerequisites](#prerequisites) · [How to run](#how-to-run) · [Frontend](#frontend) · [How to add a new client](#how-to-add-a-new-client) · [How to test](#how-to-test) · [Assumptions and trade-offs](#assumptions-and-trade-offs) · [What would change for production](#what-would-change-for-production) · [Configuration](#configuration)
 
+![Dice Bet frontend: a connected player's wallet balance, dice, bet controls, and recent rounds](docs/dice-bet.png)
+
 ## Overview
 
 - A die (1–6) is rolled server-side using `crypto/rand` behind an injectable `DiceRoller` interface.
