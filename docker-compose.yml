@@ -34,7 +34,7 @@ services:
       WS_PING_INTERVAL: 30s
       WS_MAX_MESSAGE_BYTES: 4096
       WALLET_CACHE_TTL: 30s
-      PROVABLY_FAIR_ENABLED: "false"
+      PROVABLY_FAIR_ENABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy
