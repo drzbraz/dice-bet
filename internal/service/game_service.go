@@ -72,6 +72,7 @@ type GameService struct {
 	idempotency  port.IdempotencyRepository
 	roller       port.DiceRoller
 	txManager    port.TxManager
+	cache        port.WalletBalanceCache
 	cfg          config.GameConfig
 
 	now         func() time.Time
@@ -88,6 +89,7 @@ func NewGameService(
 	idempotency port.IdempotencyRepository,
 	roller port.DiceRoller,
 	txManager port.TxManager,
+	cache port.WalletBalanceCache,
 	cfg config.GameConfig,
 ) *GameService {
 	return &GameService{
@@ -97,6 +99,7 @@ func NewGameService(
 		idempotency:  idempotency,
 		roller:       roller,
 		txManager:    txManager,
+		cache:        cache,
 		cfg:          cfg,
 		now:          time.Now,
 		newID:        uuid.NewString,
@@ -117,7 +120,7 @@ func NewGameService(
 func (s *GameService) Play(ctx context.Context, req PlayRequest) (*PlayOutcome, error) {
 	requestHash := fingerprint(fmt.Sprintf("betAmount=%d;betType=%s", req.BetAmount, req.BetType))
 
-	return runIdempotent(ctx, s.txManager, s.idempotency, s.idemBackoff, req.ClientID, req.RequestID, operationPlay, requestHash,
+	outcome, err := runIdempotent(ctx, s.txManager, s.idempotency, s.idemBackoff, req.ClientID, req.RequestID, operationPlay, requestHash,
 		func(ctx context.Context) (*PlayOutcome, error) {
 			if err := validatePlayRequest(req, s.cfg); err != nil {
 				return nil, err
@@ -189,6 +192,14 @@ func (s *GameService) Play(ctx context.Context, req PlayRequest) (*PlayOutcome, 
 			}, nil
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+	// Only after the transaction has committed: see refreshCache's doc
+	// comment for why populating the cache from inside the closure above
+	// would be unsafe.
+	s.refreshCache(ctx, req.ClientID)
+	return outcome, nil
 }
 
 // EndPlay settles the client's OPEN play: it credits the pending payout
@@ -200,7 +211,7 @@ func (s *GameService) EndPlay(ctx context.Context, req EndPlayRequest) (*EndPlay
 	// fingerprint; the hash is a constant, effectively skipping the check.
 	requestHash := fingerprint("")
 
-	return runIdempotent(ctx, s.txManager, s.idempotency, s.idemBackoff, req.ClientID, req.RequestID, operationEndPlay, requestHash,
+	outcome, err := runIdempotent(ctx, s.txManager, s.idempotency, s.idemBackoff, req.ClientID, req.RequestID, operationEndPlay, requestHash,
 		func(ctx context.Context) (*EndPlayOutcome, error) {
 			wallet, err := s.wallets.GetForUpdate(ctx, req.ClientID)
 			if err != nil {
@@ -244,6 +255,30 @@ func (s *GameService) EndPlay(ctx context.Context, req EndPlayRequest) (*EndPlay
 			}, nil
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+	s.refreshCache(ctx, req.ClientID)
+	return outcome, nil
+}
+
+// refreshCache re-reads clientID's wallet and writes it through to the
+// cache. Deliberately called only after a caller's enclosing transaction
+// has committed (never from inside runIdempotent's closure): populating
+// the cache from inside a transaction that later rolls back would leave
+// the cache holding a value the database never actually had -- recreating,
+// one layer over, the exact staleness bug this cache exists to prevent.
+// Best-effort: the cache is a performance optimization, not a correctness
+// path, so a failure here just invalidates rather than erroring the whole
+// operation -- the next GetBalance falls through to the database, which is
+// always safe.
+func (s *GameService) refreshCache(ctx context.Context, clientID string) {
+	wallet, err := s.wallets.Get(ctx, clientID)
+	if err != nil || wallet == nil {
+		s.cache.Invalidate(ctx, clientID)
+		return
+	}
+	s.cache.Set(ctx, wallet.ClientID, wallet.Balance, wallet.Currency)
 }
 
 // recordLedgerEntry appends a single append-only ledger row for a balance

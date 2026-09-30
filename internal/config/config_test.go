@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, int64(100), cfg.Game.MinBet)
 	assert.Equal(t, int64(1_000_000), cfg.Game.MaxBet)
 	assert.True(t, cfg.RunMigrations)
+	assert.Equal(t, 30*time.Second, cfg.WalletCacheTTL)
 }
 
 func TestLoad_OverridesFromEnv(t *testing.T) {
@@ -23,6 +25,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	t.Setenv("MIN_BET", "50")
 	t.Setenv("MAX_BET", "20000")
 	t.Setenv("RUN_MIGRATIONS", "false")
+	t.Setenv("WALLET_CACHE_TTL", "5s")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -30,6 +33,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	assert.Equal(t, int64(50), cfg.Game.MinBet)
 	assert.Equal(t, int64(20000), cfg.Game.MaxBet)
 	assert.False(t, cfg.RunMigrations)
+	assert.Equal(t, 5*time.Second, cfg.WalletCacheTTL)
 }
 
 func TestLoad_RejectsInvalidBetLimits(t *testing.T) {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/drzbraz/dice-bet/internal/config"
 	"github.com/drzbraz/dice-bet/internal/domain"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 	"github.com/drzbraz/dice-bet/internal/port"
 	"github.com/drzbraz/dice-bet/internal/service"
 )
@@ -125,7 +127,8 @@ func newTestRouter(pingErr error) http.Handler {
 	store := newMemStore()
 	store.wallets["alice"] = domain.Wallet{ClientID: "alice", Balance: 1000, Currency: "EUR"}
 
-	walletSvc := service.NewWalletService(&memWalletRepo{store: store})
+	walletCache := cache.NewMemoryCache(time.Minute)
+	walletSvc := service.NewWalletService(&memWalletRepo{store: store}, walletCache)
 	gameSvc := service.NewGameService(
 		&memWalletRepo{store: store},
 		&memPlayRepo{store: store},
@@ -133,6 +136,7 @@ func newTestRouter(pingErr error) http.Handler {
 		&memIdemRepo{store: store},
 		fixedRoller{value: 4}, // even
 		memTxManager{},
+		walletCache,
 		config.GameConfig{MinBet: 1, MaxBet: 100000},
 	)
 

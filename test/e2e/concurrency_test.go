@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/drzbraz/dice-bet/internal/config"
 	"github.com/drzbraz/dice-bet/internal/domain"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 	"github.com/drzbraz/dice-bet/internal/infrastructure/random"
 	"github.com/drzbraz/dice-bet/internal/repository/postgres"
 	"github.com/drzbraz/dice-bet/internal/service"
@@ -27,6 +29,7 @@ func TestConcurrency_Play_ExactlyOneSucceedsPerClient(t *testing.T) {
 	seedClient(t, pool, "alice", startingBalance)
 
 	wallets := postgres.NewWalletRepository(pool)
+	walletCache := cache.NewMemoryCache(time.Minute)
 	gameSvc := service.NewGameService(
 		wallets,
 		postgres.NewPlayRepository(pool),
@@ -34,6 +37,7 @@ func TestConcurrency_Play_ExactlyOneSucceedsPerClient(t *testing.T) {
 		postgres.NewIdempotencyRepository(pool),
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
+		walletCache,
 		config.GameConfig{MinBet: 1, MaxBet: 100_000_00},
 	)
 
@@ -67,6 +71,13 @@ func TestConcurrency_Play_ExactlyOneSucceedsPerClient(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, startingBalance-100, wallet.Balance, "balance must reflect exactly one debit")
 
+	// Even under real concurrent racing against real Postgres, the cache
+	// (written through only by the single winning goroutine, after its
+	// commit) must end up agreeing with the database exactly.
+	cachedBalance, _, ok := walletCache.Get(context.Background(), "alice")
+	require.True(t, ok, "the winning Play must have written through to the cache")
+	assert.Equal(t, wallet.Balance, cachedBalance, "cache must agree with the database after the race")
+
 	var ledgerCount int
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM wallet_transactions WHERE client_id = 'alice' AND type = 'BET_DEBIT'`,
@@ -81,6 +92,7 @@ func TestConcurrency_EndPlay_CreditedExactlyOnce(t *testing.T) {
 	seedClient(t, pool, "bob", startingBalance)
 
 	wallets := postgres.NewWalletRepository(pool)
+	walletCache := cache.NewMemoryCache(time.Minute)
 	gameSvc := service.NewGameService(
 		wallets,
 		postgres.NewPlayRepository(pool),
@@ -88,6 +100,7 @@ func TestConcurrency_EndPlay_CreditedExactlyOnce(t *testing.T) {
 		postgres.NewIdempotencyRepository(pool),
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
+		walletCache,
 		config.GameConfig{MinBet: 1, MaxBet: 100_000_00},
 	)
 
@@ -125,6 +138,10 @@ func TestConcurrency_EndPlay_CreditedExactlyOnce(t *testing.T) {
 	wallet, err := wallets.Get(context.Background(), "bob")
 	require.NoError(t, err)
 	assert.Equal(t, startingBalance-100+playOut.Payout, wallet.Balance, "payout must be credited exactly once")
+
+	cachedBalance, _, ok := walletCache.Get(context.Background(), "bob")
+	require.True(t, ok, "the winning EndPlay must have written through to the cache")
+	assert.Equal(t, wallet.Balance, cachedBalance, "cache must agree with the database after the race")
 
 	var ledgerCount int
 	require.NoError(t, pool.QueryRow(context.Background(),

@@ -131,10 +131,11 @@ cmd/
 internal/
   config/        env-var configuration with defaults + validation
   domain/        entities, dice rules, typed errors — zero external imports
-  port/          interfaces the service layer depends on (repos, TxManager, DiceRoller)
+  port/          interfaces the service layer depends on (repos, TxManager, DiceRoller, WalletBalanceCache)
   service/       Wallet/Play/EndPlay use cases, orchestrating ports inside one transaction
   repository/postgres/  pgx/v5 implementations of the port interfaces, plain SQL
   infrastructure/random/ crypto/rand DiceRoller implementation
+  infrastructure/cache/  in-memory WalletBalanceCache implementation (see "Read freshness under replica lag")
   transport/ws/   WebSocket upgrade, connection lifecycle, message router, controller
   transport/http/ REST mirror for Postman, same services/DTOs
   dto/            wire-format request/response shapes + structural validation
@@ -152,6 +153,21 @@ frontend/         React/TanStack Start client (originally scaffolded with Lovabl
 - **L**: the Postgres repositories and the in-memory test fakes both satisfy the same `port` interfaces and are interchangeable in `GameService`.
 - **I**: `WalletRepository`, `PlayRepository`, `TransactionRepository`, `IdempotencyRepository` are separate small interfaces; `DiceRoller` has exactly one method.
 - **D**: `WalletService`/`GameService` depend on `port` interfaces, never on `pgx` or `gorilla` types directly; only `cmd/server/main.go` constructs concrete implementations.
+
+## Read freshness under replica lag (wallet balance cache)
+
+Scaling read throughput usually means adding one or more read replicas and routing reads to them, keeping only writes on the primary. That introduces a well-known bug: replicas apply writes asynchronously, so a read routed to a replica immediately after a write can be served before that replica has caught up — the read silently misses its own write. `internal/port/cache.go` (`WalletBalanceCache`) exists specifically to demonstrate the fix for that, correctly scoped:
+
+- **`WalletService.GetBalance` reads cache-aside.** A hit is served without touching the database at all — this is exactly the read that would otherwise be routed to a (possibly lagging) replica at scale. A miss falls through to the database and populates the cache for next time.
+- **`GameService.Play`/`EndPlay` write through, but only *after* their transaction commits.** The obvious-looking approach — populate the cache from inside the transaction, right after `wallets.Update(...)` — is a real bug waiting to happen: if a *later* step in the same transaction fails (e.g. the ledger insert), the transaction rolls back, but a cache write from earlier in that transaction wouldn't roll back with it. The cache would end up holding a balance the database never actually had — the identical staleness bug, just relocated from the replica to the cache. So `refreshCache` runs strictly after `runIdempotent`/`WithinTx` returns successfully, re-reading the now-guaranteed-fresh row and writing that through. `TestGameService_Play_RollbackDoesNotPopulateCacheWithUncommittedValue` pins this down directly, and the concurrency e2e tests assert the cache agrees with the database after 20 real goroutines race a real Postgres instance.
+- **The locked path never goes anywhere near the cache.** `GetForUpdate` (used by the money-moving code, inside the transaction) always reads the real row under `SELECT ... FOR UPDATE`; the cache is never consulted or trusted there. Caching is only ever applied to the read that doesn't need strict consistency.
+
+What this demo deliberately does **not** do, and why that's fine here but wouldn't be in production:
+
+- **No actual read replica.** There's a single Postgres instance, so a cache miss always falls through to the one source of truth — there's no lagging replica to protect against yet. The pattern is implemented correctly and would immediately start doing real work the moment reads were split across a primary and a replica.
+- **Process-local cache (`internal/infrastructure/cache`), not shared.** With more than one server instance, each would have its own cache; an instance that didn't handle a given write wouldn't see its write-through population, and could still serve a stale value from before its own last refresh. A real multi-instance deployment needs a shared cache (Redis, most commonly) behind the same `WalletBalanceCache` interface — the service layer wouldn't change at all.
+
+A worthwhile alternative/complement, for the record: instead of (or alongside) caching, pin a session's own reads to the primary for a short window right after it writes (or use an LSN/version token to detect "has this replica caught up to my last write yet"). That guarantees freshness without a cache at all, at the cost of extra load on the primary for recent writers specifically. Caching wins when reads are heavily skewed toward a small hot set of keys (exactly wallet balances, here); primary-pinning wins when writes and reads are more evenly spread out. Which one's right depends on the actual traffic shape, not on picking a pattern in the abstract.
 
 ## Domain state machine (Play)
 
@@ -316,6 +332,6 @@ websocat ws://localhost:8080/ws
 
 ## Configuration
 
-All via environment variables (see `.env.example` for defaults): `PORT`, `DATABASE_URL`, `DB_MAX_CONNS`, `MIN_BET`, `MAX_BET`, `RUN_MIGRATIONS`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `WS_PING_INTERVAL`, `WS_MAX_MESSAGE_BYTES`.
+All via environment variables (see `.env.example` for defaults): `PORT`, `DATABASE_URL`, `DB_MAX_CONNS`, `MIN_BET`, `MAX_BET`, `RUN_MIGRATIONS`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `WS_PING_INTERVAL`, `WS_MAX_MESSAGE_BYTES`, `WALLET_CACHE_TTL`.
 
 `READ_TIMEOUT`/`WRITE_TIMEOUT` govern the plain `http.Server` only (the HTTP mirror's per-request timeouts); they do **not** apply to the WebSocket connection's read deadline, which is instead derived as `2 × WS_PING_INTERVAL` in `cmd/server/main.go`. Reusing the HTTP timeout for WS idle tolerance was a real bug caught during integration testing: with the defaults at the time (`READ_TIMEOUT=15s`, `WS_PING_INTERVAL=30s`), every idle WS connection's read deadline expired before its first keepalive ping could ever arrive, silently killing the connection after ~15s of inactivity (e.g. a player sitting on an open round). Keep this in mind if you ever change `WS_PING_INTERVAL`: the read deadline tracks it automatically, but a *very* long ping interval still means a *very* long tolerance for a genuinely dead connection going undetected.

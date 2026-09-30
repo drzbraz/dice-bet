@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/drzbraz/dice-bet/internal/domain"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 	"github.com/drzbraz/dice-bet/internal/port"
 )
 
@@ -279,6 +281,7 @@ type testHarness struct {
 	idempotency *fakeIdempotencyRepository
 	roller      *fakeDiceRoller
 	txManager   *fakeTxManager
+	cache       *cache.MemoryCache
 	game        *GameService
 	wallet      *WalletService
 }
@@ -293,11 +296,12 @@ func newTestHarness(minBet, maxBet int64, rolls ...int) *testHarness {
 		idempotency: &fakeIdempotencyRepository{store: store},
 		roller:      &fakeDiceRoller{rolls: rolls},
 		txManager:   &fakeTxManager{store: store},
+		cache:       cache.NewMemoryCache(time.Minute),
 	}
-	h.game = NewGameService(h.wallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, gameConfigFor(minBet, maxBet))
+	h.game = NewGameService(h.wallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(minBet, maxBet))
 	h.game.now = fixedClock
 	h.game.idemBackoff = func(context.Context, int) {}
-	h.wallet = NewWalletService(h.wallets)
+	h.wallet = NewWalletService(h.wallets, h.cache)
 	return h
 }
 

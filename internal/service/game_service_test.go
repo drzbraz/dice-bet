@@ -11,6 +11,7 @@ import (
 
 	"github.com/drzbraz/dice-bet/internal/config"
 	"github.com/drzbraz/dice-bet/internal/domain"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 )
 
 func gameConfigFor(minBet, maxBet int64) config.GameConfig {
@@ -265,7 +266,7 @@ func TestGameService_Play_RepositoryErrorPropagatesAsInternal(t *testing.T) {
 	txManager := &fakeTxManager{store: store}
 	idem := &fakeIdempotencyRepository{store: store}
 	roller := &fakeDiceRoller{rolls: []int{2}}
-	svc := NewGameService(failingWallets, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, idem, roller, txManager, gameConfigFor(1, 10000))
+	svc := NewGameService(failingWallets, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, idem, roller, txManager, cache.NewMemoryCache(time.Minute), gameConfigFor(1, 10000))
 
 	_, err := svc.Play(context.Background(), PlayRequest{
 		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
@@ -374,7 +375,7 @@ func TestGameService_EndPlay_WalletUpdateFailurePropagatesAsInternal(t *testing.
 	require.NoError(t, err)
 
 	failingWallets := &updateFailingWalletRepository{fakeWalletRepository: h.wallets, err: errors.New("write timeout")}
-	svc := NewGameService(failingWallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, gameConfigFor(100, 10000))
+	svc := NewGameService(failingWallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(100, 10000))
 	svc.now = fixedClock
 	svc.idemBackoff = func(context.Context, int) {}
 
@@ -394,7 +395,7 @@ func TestGameService_EndPlay_PlayCloseFailurePropagatesAsInternal(t *testing.T) 
 	require.NoError(t, err)
 
 	failingPlays := &closeFailingPlayRepository{fakePlayRepository: h.plays, err: errors.New("write timeout")}
-	svc := NewGameService(h.wallets, failingPlays, h.txs, h.idempotency, h.roller, h.txManager, gameConfigFor(100, 10000))
+	svc := NewGameService(h.wallets, failingPlays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(100, 10000))
 	svc.now = fixedClock
 	svc.idemBackoff = func(context.Context, int) {}
 
@@ -432,7 +433,7 @@ func TestGameService_Play_IdempotencyGetFailurePropagatesAsInternal(t *testing.T
 	store := newFakeStore()
 	h := newTestHarness(100, 10000, 2)
 	h.seedWallet("alice", 1000)
-	svc := NewGameService(h.wallets, h.plays, h.txs, &erroringIdempotencyRepository{err: errors.New("db down")}, h.roller, &fakeTxManager{store: store}, gameConfigFor(100, 10000))
+	svc := NewGameService(h.wallets, h.plays, h.txs, &erroringIdempotencyRepository{err: errors.New("db down")}, h.roller, &fakeTxManager{store: store}, h.cache, gameConfigFor(100, 10000))
 
 	_, err := svc.Play(context.Background(), PlayRequest{
 		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
@@ -442,8 +443,68 @@ func TestGameService_Play_IdempotencyGetFailurePropagatesAsInternal(t *testing.T
 
 func TestGameService_EndPlay_IdempotencyGetFailurePropagatesAsInternal(t *testing.T) {
 	store := newFakeStore()
-	svc := NewGameService(&fakeWalletRepository{store: store}, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, &erroringIdempotencyRepository{err: errors.New("db down")}, &fakeDiceRoller{}, &fakeTxManager{store: store}, gameConfigFor(100, 10000))
+	svc := NewGameService(&fakeWalletRepository{store: store}, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, &erroringIdempotencyRepository{err: errors.New("db down")}, &fakeDiceRoller{}, &fakeTxManager{store: store}, cache.NewMemoryCache(time.Minute), gameConfigFor(100, 10000))
 
 	_, err := svc.EndPlay(context.Background(), EndPlayRequest{ClientID: "alice", RequestID: "req-1"})
 	requireDomainErr(t, err, domain.ErrCodeInternal)
+}
+
+func TestGameService_Play_WritesThroughToCacheAfterCommit(t *testing.T) {
+	h := newTestHarness(100, 10000, 2)
+	h.seedWallet("alice", 1000)
+	// Prime the cache with a stale value, the way a prior GetBalance call
+	// would have: Play must overwrite it with the post-commit balance, not
+	// just leave the stale entry in place.
+	h.cache.Set(context.Background(), "alice", 999999, "EUR")
+
+	out, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+	require.NoError(t, err)
+
+	balance, currency, ok := h.cache.Get(context.Background(), "alice")
+	require.True(t, ok)
+	assert.Equal(t, out.Balance, balance)
+	assert.Equal(t, int64(900), balance)
+	assert.Equal(t, "EUR", currency)
+}
+
+func TestGameService_EndPlay_WritesThroughToCacheAfterCommit(t *testing.T) {
+	h := newTestHarness(100, 10000, 2)
+	h.seedWallet("alice", 1000)
+	_, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 500, BetType: domain.BetTypeEven,
+	})
+	require.NoError(t, err)
+
+	out, err := h.game.EndPlay(context.Background(), EndPlayRequest{ClientID: "alice", RequestID: "req-2"})
+	require.NoError(t, err)
+
+	balance, _, ok := h.cache.Get(context.Background(), "alice")
+	require.True(t, ok)
+	assert.Equal(t, out.Balance, balance)
+	assert.Equal(t, int64(1500), balance)
+}
+
+func TestGameService_Play_RollbackDoesNotPopulateCacheWithUncommittedValue(t *testing.T) {
+	h := newTestHarness(100, 10000, 2)
+	h.seedWallet("alice", 1000)
+	// Force a mid-transaction failure the same way
+	// TestGameService_Play_RollbackOnMidTransactionFailure does: a ledger
+	// row that collides with the one Play will try to insert, after the
+	// wallet has already been debited in-memory.
+	h.store.ledger = append(h.store.ledger, domain.WalletTransaction{
+		PlayID: "collide", Type: domain.TransactionTypeBetDebit,
+	})
+	h.game.newID = func() string { return "collide" }
+
+	_, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+	requireDomainErr(t, err, domain.ErrCodeInternal)
+
+	// The debit was rolled back; had the cache been written from inside
+	// the failed transaction it would show 900, not the untouched 1000.
+	_, _, ok := h.cache.Get(context.Background(), "alice")
+	assert.False(t, ok, "a failed transaction must not populate the cache at all")
 }

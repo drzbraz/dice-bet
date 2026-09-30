@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/drzbraz/dice-bet/internal/config"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 	"github.com/drzbraz/dice-bet/internal/infrastructure/random"
 	"github.com/drzbraz/dice-bet/internal/repository/postgres"
 	"github.com/drzbraz/dice-bet/internal/service"
@@ -68,9 +69,13 @@ func run(logger *slog.Logger) error {
 	idempotencyRepo := postgres.NewIdempotencyRepository(pool)
 	txManager := postgres.NewTxManager(pool)
 	roller := random.NewCryptoRoller()
+	// Shared by both services below: GameService writes through to it on
+	// every committed mutation, WalletService reads from it cache-aside.
+	// See internal/port/cache.go for why this exists.
+	walletCache := cache.NewMemoryCache(cfg.WalletCacheTTL)
 
-	walletSvc := service.NewWalletService(walletRepo)
-	gameSvc := service.NewGameService(walletRepo, playRepo, transactionRepo, idempotencyRepo, roller, txManager, cfg.Game)
+	walletSvc := service.NewWalletService(walletRepo, walletCache)
+	gameSvc := service.NewGameService(walletRepo, playRepo, transactionRepo, idempotencyRepo, roller, txManager, walletCache, cfg.Game)
 
 	wsRouter := ws.NewRouter()
 	ws.NewController(walletSvc, gameSvc).RegisterRoutes(wsRouter)

@@ -18,20 +18,31 @@ type WalletBalance struct {
 }
 
 // WalletService implements the Wallet use case: looking up a client's
-// current balance. It is a pure read, so it does not participate in the
-// idempotency scheme (which only guards mutating operations).
+// current balance.
+//
+// GetBalance reads cache-aside: a hit is served without touching the
+// database at all -- the read that, at scale, would otherwise be routed to
+// a (possibly lagging) replica. A miss falls through to the database and
+// populates the cache for next time. The cache's write-through population
+// after a successful Play/EndPlay (see GameService) is what keeps hits
+// fresh; see the README for why that happens only after commit.
 type WalletService struct {
 	wallets port.WalletRepository
+	cache   port.WalletBalanceCache
 }
 
 // NewWalletService constructs a WalletService.
-func NewWalletService(wallets port.WalletRepository) *WalletService {
-	return &WalletService{wallets: wallets}
+func NewWalletService(wallets port.WalletRepository, cache port.WalletBalanceCache) *WalletService {
+	return &WalletService{wallets: wallets, cache: cache}
 }
 
 // GetBalance returns the current balance for clientID, or a
 // CLIENT_NOT_FOUND domain error if the client does not exist.
 func (s *WalletService) GetBalance(ctx context.Context, clientID string) (*WalletBalance, error) {
+	if balance, currency, ok := s.cache.Get(ctx, clientID); ok {
+		return &WalletBalance{ClientID: clientID, Balance: balance, Currency: currency}, nil
+	}
+
 	wallet, err := s.wallets.Get(ctx, clientID)
 	if err != nil {
 		return nil, wrapRepoErr(err)
@@ -39,6 +50,8 @@ func (s *WalletService) GetBalance(ctx context.Context, clientID string) (*Walle
 	if wallet == nil {
 		return nil, domain.ErrClientNotFound(clientID)
 	}
+
+	s.cache.Set(ctx, wallet.ClientID, wallet.Balance, wallet.Currency)
 	return &WalletBalance{
 		ClientID: wallet.ClientID,
 		Balance:  wallet.Balance,

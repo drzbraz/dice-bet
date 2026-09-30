@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/drzbraz/dice-bet/internal/config"
 	"github.com/drzbraz/dice-bet/internal/domain"
+	"github.com/drzbraz/dice-bet/internal/infrastructure/cache"
 	"github.com/drzbraz/dice-bet/internal/infrastructure/random"
 	"github.com/drzbraz/dice-bet/internal/repository/postgres"
 	"github.com/drzbraz/dice-bet/internal/service"
@@ -25,7 +27,8 @@ func TestHappyPath_WalletPlayEndPlayWallet(t *testing.T) {
 	const startingBalance = int64(100_00)
 	seedClient(t, pool, "carol", startingBalance)
 
-	walletSvc := service.NewWalletService(postgres.NewWalletRepository(pool))
+	walletCache := cache.NewMemoryCache(time.Minute)
+	walletSvc := service.NewWalletService(postgres.NewWalletRepository(pool), walletCache)
 	gameSvc := service.NewGameService(
 		postgres.NewWalletRepository(pool),
 		postgres.NewPlayRepository(pool),
@@ -33,6 +36,7 @@ func TestHappyPath_WalletPlayEndPlayWallet(t *testing.T) {
 		postgres.NewIdempotencyRepository(pool),
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
+		walletCache,
 		config.GameConfig{MinBet: 1, MaxBet: 100_00},
 	)
 	ctx := context.Background()

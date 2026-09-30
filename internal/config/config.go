@@ -22,6 +22,12 @@ type Config struct {
 	WriteTimeout      time.Duration
 	WSPingInterval    time.Duration
 	WSMaxMessageBytes int64
+
+	// WalletCacheTTL bounds how long a cached wallet balance is trusted
+	// without a fresh write-through. Every wallet mutation writes through
+	// on commit, so this is a defense-in-depth backstop, not the primary
+	// freshness mechanism -- see WalletBalanceCache.
+	WalletCacheTTL time.Duration
 }
 
 // GameConfig holds the betting limits enforced by the game service. It is
@@ -48,6 +54,7 @@ func Load() (Config, error) {
 		WriteTimeout:      getEnvDuration("WRITE_TIMEOUT", 15*time.Second),
 		WSPingInterval:    getEnvDuration("WS_PING_INTERVAL", 30*time.Second),
 		WSMaxMessageBytes: getEnvInt64("WS_MAX_MESSAGE_BYTES", 4096),
+		WalletCacheTTL:    getEnvDuration("WALLET_CACHE_TTL", 30*time.Second),
 	}
 
 	if err := cfg.validate(); err != nil {
