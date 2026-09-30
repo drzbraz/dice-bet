@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -297,6 +298,7 @@ type testHarness struct {
 	roller      *fakeDiceRoller
 	txManager   *fakeTxManager
 	cache       *cache.MemoryCache
+	fairness    *FairnessService
 	game        *GameService
 	wallet      *WalletService
 }
@@ -313,7 +315,7 @@ func newTestHarness(minBet, maxBet int64, rolls ...int) *testHarness {
 		txManager:   &fakeTxManager{store: store},
 		cache:       cache.NewMemoryCache(time.Minute),
 	}
-	h.game = NewGameService(h.wallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(minBet, maxBet))
+	h.game = NewGameService(h.wallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, nil, gameConfigFor(minBet, maxBet))
 	h.game.now = fixedClock
 	h.game.idemBackoff = func(context.Context, int) {}
 	h.wallet = NewWalletService(h.wallets, h.cache)
@@ -325,4 +327,125 @@ func (h *testHarness) seedWallet(clientID string, balance int64) {
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
 	h.store.wallets[clientID] = domain.Wallet{ClientID: clientID, Balance: balance, Currency: "EUR"}
+}
+
+// fakeFairnessRepository is an in-memory port.FairnessRepository: a map of
+// active seeds keyed by clientID, plus a per-client history of retired
+// ones (newest first, matching Postgres's ORDER BY retired_at DESC).
+type fakeFairnessRepository struct {
+	mu      sync.Mutex
+	active  map[string]domain.FairnessSeed
+	retired map[string][]domain.FairnessSeed
+}
+
+func newFakeFairnessRepository() *fakeFairnessRepository {
+	return &fakeFairnessRepository{
+		active:  make(map[string]domain.FairnessSeed),
+		retired: make(map[string][]domain.FairnessSeed),
+	}
+}
+
+func (r *fakeFairnessRepository) GetActiveForUpdate(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) Create(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.active[seed.ClientID]; exists {
+		return domain.ErrInternal(errors.New("active fairness seed already exists for client"))
+	}
+	r.active[seed.ClientID] = *seed
+	return nil
+}
+
+func (r *fakeFairnessRepository) IncrementNonce(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[seed.ClientID]
+	if !ok {
+		return domain.ErrInternal(errors.New("no active fairness seed for client"))
+	}
+	s.Nonce = seed.Nonce
+	r.active[seed.ClientID] = s
+	return nil
+}
+
+func (r *fakeFairnessRepository) Retire(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	now := time.Now()
+	s.RetiredAt = &now
+	delete(r.active, clientID)
+	r.retired[clientID] = append([]domain.FairnessSeed{s}, r.retired[clientID]...)
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) ListRetired(ctx context.Context, clientID string) ([]domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]domain.FairnessSeed(nil), r.retired[clientID]...), nil
+}
+
+// fakeSeedGenerator produces deterministic, distinguishable-by-call-count
+// seeds instead of real randomness -- the point of these unit tests is the
+// service-layer wiring (nonce increments, rollback safety, rotation), not
+// the entropy source, which infrastructure/random's own tests cover.
+type fakeSeedGenerator struct {
+	serverCalls int
+	clientCalls int
+}
+
+func (g *fakeSeedGenerator) GenerateServerSeed() (string, error) {
+	g.serverCalls++
+	return fmt.Sprintf("fake-server-seed-%d", g.serverCalls), nil
+}
+
+func (g *fakeSeedGenerator) GenerateClientSeed() (string, error) {
+	g.clientCalls++
+	return fmt.Sprintf("fake-client-seed-%d", g.clientCalls), nil
+}
+
+// failingSeedGenerator always fails, to test that seed-generation failures
+// propagate as INTERNAL_ERROR.
+type failingSeedGenerator struct{ err error }
+
+func (g *failingSeedGenerator) GenerateServerSeed() (string, error) { return "", g.err }
+func (g *failingSeedGenerator) GenerateClientSeed() (string, error) { return "", g.err }
+
+// enableFairness wires a FairnessService into h, backed by fresh fakes,
+// and assigns it to h.game.fairness so Play/EndPlay start deriving rolls
+// through it instead of h.roller. Not done by default in newTestHarness:
+// most tests exercise the PROVABLY_FAIR_ENABLED=false path (fairness ==
+// nil), which is also what proves this feature is fully additive.
+func (h *testHarness) enableFairness() *fakeFairnessRepository {
+	repo := newFakeFairnessRepository()
+	h.fairness = NewFairnessService(repo, &fakeSeedGenerator{}, h.txManager)
+	h.fairness.now = fixedClock
+	h.fairness.newID = fixedIDGenerator()
+	h.game.fairness = h.fairness
+	return repo
+}
+
+// fixedIDGenerator returns a func() string producing "fairness-seed-1",
+// "fairness-seed-2", ... -- deterministic IDs for assertions, mirroring
+// fixedClock's role for timestamps.
+func fixedIDGenerator() func() string {
+	n := 0
+	return func() string {
+		n++
+		return fmt.Sprintf("fairness-seed-%d", n)
+	}
 }

@@ -25,6 +25,7 @@ var statusByCode = map[domain.ErrorCode]int{
 	domain.ErrCodeNoActivePlay:          http.StatusConflict,
 	domain.ErrCodeServiceUnavailable:    http.StatusServiceUnavailable,
 	domain.ErrCodeInternal:              http.StatusInternalServerError,
+	domain.ErrCodeFairnessDisabled:      http.StatusNotFound,
 }
 
 // mapError converts any error into an HTTP status and the ErrorDetail to

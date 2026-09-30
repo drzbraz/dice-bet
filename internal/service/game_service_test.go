@@ -266,7 +266,7 @@ func TestGameService_Play_RepositoryErrorPropagatesAsInternal(t *testing.T) {
 	txManager := &fakeTxManager{store: store}
 	idem := &fakeIdempotencyRepository{store: store}
 	roller := &fakeDiceRoller{rolls: []int{2}}
-	svc := NewGameService(failingWallets, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, idem, roller, txManager, cache.NewMemoryCache(time.Minute), gameConfigFor(1, 10000))
+	svc := NewGameService(failingWallets, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, idem, roller, txManager, cache.NewMemoryCache(time.Minute), nil, gameConfigFor(1, 10000))
 
 	_, err := svc.Play(context.Background(), PlayRequest{
 		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
@@ -375,7 +375,7 @@ func TestGameService_EndPlay_WalletUpdateFailurePropagatesAsInternal(t *testing.
 	require.NoError(t, err)
 
 	failingWallets := &updateFailingWalletRepository{fakeWalletRepository: h.wallets, err: errors.New("write timeout")}
-	svc := NewGameService(failingWallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(100, 10000))
+	svc := NewGameService(failingWallets, h.plays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, nil, gameConfigFor(100, 10000))
 	svc.now = fixedClock
 	svc.idemBackoff = func(context.Context, int) {}
 
@@ -395,7 +395,7 @@ func TestGameService_EndPlay_PlayCloseFailurePropagatesAsInternal(t *testing.T) 
 	require.NoError(t, err)
 
 	failingPlays := &closeFailingPlayRepository{fakePlayRepository: h.plays, err: errors.New("write timeout")}
-	svc := NewGameService(h.wallets, failingPlays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, gameConfigFor(100, 10000))
+	svc := NewGameService(h.wallets, failingPlays, h.txs, h.idempotency, h.roller, h.txManager, h.cache, nil, gameConfigFor(100, 10000))
 	svc.now = fixedClock
 	svc.idemBackoff = func(context.Context, int) {}
 
@@ -433,7 +433,7 @@ func TestGameService_Play_IdempotencyGetFailurePropagatesAsInternal(t *testing.T
 	store := newFakeStore()
 	h := newTestHarness(100, 10000, 2)
 	h.seedWallet("alice", 1000)
-	svc := NewGameService(h.wallets, h.plays, h.txs, &erroringIdempotencyRepository{err: errors.New("db down")}, h.roller, &fakeTxManager{store: store}, h.cache, gameConfigFor(100, 10000))
+	svc := NewGameService(h.wallets, h.plays, h.txs, &erroringIdempotencyRepository{err: errors.New("db down")}, h.roller, &fakeTxManager{store: store}, h.cache, nil, gameConfigFor(100, 10000))
 
 	_, err := svc.Play(context.Background(), PlayRequest{
 		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
@@ -443,7 +443,7 @@ func TestGameService_Play_IdempotencyGetFailurePropagatesAsInternal(t *testing.T
 
 func TestGameService_EndPlay_IdempotencyGetFailurePropagatesAsInternal(t *testing.T) {
 	store := newFakeStore()
-	svc := NewGameService(&fakeWalletRepository{store: store}, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, &erroringIdempotencyRepository{err: errors.New("db down")}, &fakeDiceRoller{}, &fakeTxManager{store: store}, cache.NewMemoryCache(time.Minute), gameConfigFor(100, 10000))
+	svc := NewGameService(&fakeWalletRepository{store: store}, &fakePlayRepository{store: store}, &fakeTransactionRepository{store: store}, &erroringIdempotencyRepository{err: errors.New("db down")}, &fakeDiceRoller{}, &fakeTxManager{store: store}, cache.NewMemoryCache(time.Minute), nil, gameConfigFor(100, 10000))
 
 	_, err := svc.EndPlay(context.Background(), EndPlayRequest{ClientID: "alice", RequestID: "req-1"})
 	requireDomainErr(t, err, domain.ErrCodeInternal)
@@ -507,4 +507,61 @@ func TestGameService_Play_RollbackDoesNotPopulateCacheWithUncommittedValue(t *te
 	// the failed transaction it would show 900, not the untouched 1000.
 	_, _, ok := h.cache.Get(context.Background(), "alice")
 	assert.False(t, ok, "a failed transaction must not populate the cache at all")
+}
+
+func TestGameService_Play_FairnessDisabled_OutcomeHasNilFairness(t *testing.T) {
+	h := newTestHarness(100, 10000, 2)
+	h.seedWallet("alice", 1000)
+
+	out, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+
+	require.NoError(t, err)
+	assert.Nil(t, out.Fairness, "PROVABLY_FAIR_ENABLED=false (fairness==nil) must leave Fairness nil, exactly as before this feature existed")
+	assert.Equal(t, 2, out.RolledNumber, "must still use the plain roller, untouched")
+}
+
+func TestGameService_Play_FairnessEnabled_PopulatesFairnessAndMatchesComputeRoll(t *testing.T) {
+	h := newTestHarness(100, 10000, 2) // roller value is irrelevant once fairness is enabled
+	h.seedWallet("alice", 1000)
+	repo := h.enableFairness()
+
+	out, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, out.Fairness)
+	assert.Equal(t, int64(0), out.Fairness.Nonce, "first roll for a fresh client uses nonce 0")
+	assert.NotEmpty(t, out.Fairness.ServerSeedHash)
+	assert.NotEmpty(t, out.Fairness.ClientSeed)
+
+	seed, err := repo.GetActiveForUpdate(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, out.RolledNumber, domain.ComputeRoll(seed.ServerSeed, seed.ClientSeed, out.Fairness.Nonce),
+		"the roll actually used must be exactly what an independent verifier recomputes from the seed")
+	assert.Equal(t, int64(1), seed.Nonce, "the nonce must have advanced past the one just used")
+}
+
+func TestGameService_Play_FairnessEnabled_NonceIncrementsAcrossSuccessivePlays(t *testing.T) {
+	h := newTestHarness(100, 10000, 2)
+	h.seedWallet("alice", 1000)
+	h.enableFairness()
+
+	first, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-1", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+	require.NoError(t, err)
+	_, err = h.game.EndPlay(context.Background(), EndPlayRequest{ClientID: "alice", RequestID: "req-2"})
+	require.NoError(t, err)
+
+	second, err := h.game.Play(context.Background(), PlayRequest{
+		ClientID: "alice", RequestID: "req-3", BetAmount: 100, BetType: domain.BetTypeEven,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(0), first.Fairness.Nonce)
+	assert.Equal(t, int64(1), second.Fairness.Nonce)
+	assert.Equal(t, first.Fairness.ServerSeedHash, second.Fairness.ServerSeedHash, "same epoch, no rotation happened")
 }

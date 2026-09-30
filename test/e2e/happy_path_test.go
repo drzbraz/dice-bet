@@ -37,6 +37,7 @@ func TestHappyPath_WalletPlayEndPlayWallet(t *testing.T) {
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
 		walletCache,
+		nil,
 		config.GameConfig{MinBet: 1, MaxBet: 100_00},
 	)
 	ctx := context.Background()

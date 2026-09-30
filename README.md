@@ -2,7 +2,7 @@
 
 A production-quality Go backend for a dice game where a player bets whether the next roll is `EVEN` or `ODD`. Built for a technical assessment; graded on architecture, concurrency correctness, error handling, and tests rather than feature count.
 
-**Contents**: [Overview](#overview) · [Architecture](#architecture) · [Read freshness under replica lag](#read-freshness-under-replica-lag-wallet-balance-cache) · [Domain state machine](#domain-state-machine-play) · [WebSocket contract](#websocket-contract) · [HTTP mirror](#http-mirror-for-postman) · [Prerequisites](#prerequisites) · [How to run](#how-to-run) · [Frontend](#frontend) · [How to add a new client](#how-to-add-a-new-client) · [How to test](#how-to-test) · [Assumptions and trade-offs](#assumptions-and-trade-offs) · [What would change for production](#what-would-change-for-production) · [Configuration](#configuration)
+**Contents**: [Overview](#overview) · [Architecture](#architecture) · [Read freshness under replica lag](#read-freshness-under-replica-lag-wallet-balance-cache) · [Provably fair rolls](#provably-fair-rolls) · [Domain state machine](#domain-state-machine-play) · [WebSocket contract](#websocket-contract) · [HTTP mirror](#http-mirror-for-postman) · [Prerequisites](#prerequisites) · [How to run](#how-to-run) · [Frontend](#frontend) · [How to add a new client](#how-to-add-a-new-client) · [How to test](#how-to-test) · [Assumptions and trade-offs](#assumptions-and-trade-offs) · [What would change for production](#what-would-change-for-production) · [Configuration](#configuration)
 
 ![Dice Bet frontend: a connected player's wallet balance, dice, bet controls, and recent rounds](docs/dice-bet.png)
 
@@ -135,10 +135,10 @@ cmd/
 internal/
   config/        env-var configuration with defaults + validation
   domain/        entities, dice rules, typed errors — zero external imports
-  port/          interfaces the service layer depends on (repos, TxManager, DiceRoller, WalletBalanceCache)
-  service/       Wallet/Play/EndPlay use cases, orchestrating ports inside one transaction
+  port/          interfaces the service layer depends on (repos, TxManager, DiceRoller, WalletBalanceCache, FairnessRepository, SeedGenerator)
+  service/       Wallet/Play/EndPlay/Fairness use cases, orchestrating ports inside one transaction
   repository/postgres/  pgx/v5 implementations of the port interfaces, plain SQL
-  infrastructure/random/ crypto/rand DiceRoller implementation
+  infrastructure/random/ crypto/rand DiceRoller + SeedGenerator implementations
   infrastructure/cache/  in-memory WalletBalanceCache implementation (see "Read freshness under replica lag")
   transport/ws/   WebSocket upgrade, connection lifecycle, message router, controller
   transport/http/ REST mirror for Postman, same services/DTOs
@@ -173,6 +173,29 @@ What this demo deliberately does **not** do, and why that's fine here but wouldn
 
 A worthwhile alternative/complement, for the record: instead of (or alongside) caching, pin a session's own reads to the primary for a short window right after it writes (or use an LSN/version token to detect "has this replica caught up to my last write yet"). That guarantees freshness without a cache at all, at the cost of extra load on the primary for recent writers specifically. Caching wins when reads are heavily skewed toward a small hot set of keys (exactly wallet balances, here); primary-pinning wins when writes and reads are more evenly spread out. Which one's right depends on the actual traffic shape, not on picking a pattern in the abstract.
 
+## Provably fair rolls
+
+The core trust problem in any online dice game: the player has to take the server's word for it that a roll wasn't picked to favor the house after the bet was already known. `PROVABLY_FAIR_ENABLED` (default `true`) switches roll derivation from plain `crypto/rand` to a commit-reveal scheme that removes that trust requirement entirely — fully additively (see "Fully additive" below).
+
+**The scheme.** Each client has a sequence of seed "epochs" (`fairness_seeds`, one row active at a time, enforced the same way as one-open-play-per-client — a partial unique index):
+
+1. A fresh epoch starts with a secret `serverSeed` (32 random bytes, hex-encoded) and a `clientSeed` (16 random bytes by default, or a player-supplied string). The server publishes only `serverSeedHash = SHA256(serverSeed)` — the *commitment* — via `seed.get`, before any bet happens.
+2. Every `play.start` while that epoch is active derives its roll as `HMAC-SHA256(serverSeed, "clientSeed:nonce")`, taking the first 4 bytes as a big-endian `uint32` reduced mod 6 (`internal/domain/fairness.go` `ComputeRoll`), where `nonce` starts at 0 and increments once per roll. The response includes `nonce` and `serverSeedHash` (but never the still-secret `serverSeed`) under a `fairness` key.
+3. `seed.rotate` retires the active epoch — **revealing `serverSeed`** — and immediately activates a new one. Once revealed, anyone can recompute `SHA256(serverSeed)` and confirm it matches the hash published in step 1, then recompute `ComputeRoll(serverSeed, clientSeed, nonce)` for any past round and confirm it matches the roll they were shown. `seed.history` lists every retired epoch so this works for old rounds too, not just the one just rotated.
+
+**Why this actually proves something, not just obscures it.** SHA-256 is preimage- and collision-resistant: publishing the hash before the bet cryptographically commits the server to that exact seed, without revealing it. If the server tried to swap in a different seed after seeing the bet, the swapped seed's hash wouldn't match what was already published — a player would catch that instantly on verification. This is a guarantee about *not adapting the outcome after the fact*, not a claim that the roll is "more random" than `crypto/rand` — it's a different property entirely (verifiable non-manipulation vs. raw entropy quality), and it's the property that actually matters for player trust.
+
+**Frontend verification is real, not decorative.** `frontend/src/lib/verify-fairness.ts` reimplements `ComputeRoll` independently using the browser's native Web Crypto API (`crypto.subtle`) — no network call back to this server. The "Provably fair" panel's "Verify" button runs entirely client-side: it takes a revealed `serverSeed` plus a round's `clientSeed`/`nonce`, recomputes the roll in the browser, and compares it to what the server showed at play time. The two implementations were cross-checked against the same fixed input vectors (`TestComputeRoll_GoldenVectors` in Go, manually verified byte-for-byte identical in Node's Web Crypto) specifically so a future refactor of either side can't silently drift apart without a test catching it.
+
+**Fully additive — the flag genuinely changes nothing when off.**
+
+- `GameService`'s existing `port.DiceRoller` field and constructor signature are untouched; a new, *optional* `*FairnessService` dependency is threaded through instead (`nil` when the flag is off). `Play` branches on it: `nil` → the exact `s.roller.Roll(ctx)` call that existed before this feature, byte-for-byte; non-nil → `FairnessService.RollFor`, which locks the client's active seed row (`GetActiveForUpdate`, the same `SELECT ... FOR UPDATE` pattern as wallets) inside the *same* transaction as the wallet debit, so the nonce incrementing and the money movement commit or roll back together atomically.
+- The migration (`000004_fairness_seeds`) only adds a new table — it does not alter `wallets`, `plays`, or any existing schema, so there's zero risk to data or constraints already in place.
+- `seed.get`/`seed.rotate`/`seed.history` are new message types/routes; no existing WebSocket message type or HTTP endpoint changed shape except `play.start`'s response gaining an optional `fairness` object (omitted entirely, not just null, when the flag is off).
+- Every existing test in the repo constructs `GameService`/`Controller` with `fairness: nil` and is unmodified in behavior — proving the "off" path really is identical to pre-feature behavior, not just claimed to be. The feature's own tests are additive: `internal/service/fairness_service_test.go`, the `TestGameService_Play_Fairness*` cases, `TestHTTP_*Seed*`, `TestWS_Seed*`/`TestWS_PlayStart_WithFairnessEnabled_*`, and two new Postgres/e2e tests (`test/e2e/fairness_test.go`) — one proving the full real-stack round trip (play, rotate, independently re-verify against real Postgres), one proving under a real 20-goroutine race that the nonce advances by exactly one per successful play, never more.
+
+**Scope note.** `clientSeed` defaults to server-generated but accepts a player-supplied override on `seed.rotate` — letting the player contribute entropy the server couldn't have optimized around when it originally committed to the hash. There's no scheduled auto-rotation (a player/client decides when to rotate); a production deployment might rotate automatically after N rounds or T time, on the same `FairnessRepository` interface, with no service-layer change.
+
 ## Domain state machine (Play)
 
 ```
@@ -196,12 +219,12 @@ Endpoint: `ws://localhost:8080/ws`. JSON text frames.
 
 **Request envelope**
 ```json
-{ "type": "wallet.get | play.start | play.end", "requestId": "uuid-v4", "payload": { } }
+{ "type": "wallet.get | play.start | play.end | seed.get | seed.rotate | seed.history", "requestId": "uuid-v4", "payload": { } }
 ```
 
 **Success response**
 ```json
-{ "type": "wallet.get.result | play.start.result | play.end.result", "requestId": "same uuid as request", "success": true, "data": { }, "timestamp": "RFC3339" }
+{ "type": "wallet.get.result | play.start.result | play.end.result | seed.get.result | seed.rotate.result | seed.history.result", "requestId": "same uuid as request", "success": true, "data": { }, "timestamp": "RFC3339" }
 ```
 
 **Error response**
@@ -214,8 +237,11 @@ Endpoint: `ws://localhost:8080/ws`. JSON text frames.
 | Type | Request payload | Response data |
 |---|---|---|
 | `wallet.get` | `{ "clientId" }` | `{ "clientId", "balance", "currency" }` |
-| `play.start` | `{ "clientId", "betAmount", "betType" }` | `{ "playId", "clientId", "betAmount", "betType", "rolledNumber", "result", "payout", "status", "balance" }` |
+| `play.start` | `{ "clientId", "betAmount", "betType" }` | `{ "playId", "clientId", "betAmount", "betType", "rolledNumber", "result", "payout", "status", "balance", "fairness"? }` — `fairness: { "serverSeedHash", "clientSeed", "nonce" }` present only when [provably fair](#provably-fair-rolls) is on |
 | `play.end` | `{ "clientId" }` | `{ "playId", "clientId", "result", "creditedAmount", "status", "balance" }` |
+| `seed.get` | `{ "clientId" }` | `{ "clientId", "serverSeedHash", "clientSeed", "nonce" }` |
+| `seed.rotate` | `{ "clientId", "clientSeed"? }` | `{ "retired"?: { "serverSeed", "serverSeedHash", "clientSeed", "finalNonce", "retiredAt" }, "active": { same shape as seed.get } }` |
+| `seed.history` | `{ "clientId" }` | `{ "seeds": [ same shape as seed.rotate's "retired", newest first ] }` |
 
 ### Error codes (single source of truth: `internal/domain/errors.go`)
 
@@ -232,6 +258,7 @@ Endpoint: `ws://localhost:8080/ws`. JSON text frames.
 | `NO_ACTIVE_PLAY` | error frame | 409 |
 | `SERVICE_UNAVAILABLE` | error frame | 503 |
 | `INTERNAL_ERROR` (never leaks SQL/internal detail) | error frame | 500 |
+| `FAIRNESS_DISABLED` (a `seed.*` call while `PROVABLY_FAIR_ENABLED=false`) | error frame | 404 |
 
 ## HTTP mirror (for Postman)
 
@@ -241,7 +268,12 @@ Same use cases, same services/DTOs — this also demonstrates the business layer
 - `GET  /api/v1/clients/{clientId}/wallet`
 - `POST /api/v1/plays` — body `{ "clientId", "betAmount", "betType" }`, header `Idempotency-Key` (required)
 - `POST /api/v1/plays/end` — body `{ "clientId" }`, header `Idempotency-Key` (required)
+- `GET  /api/v1/clients/{clientId}/fairness/seed` — current commitment, see [Provably fair rolls](#provably-fair-rolls)
+- `POST /api/v1/clients/{clientId}/fairness/rotate` — body `{ "clientSeed"? }` (optional), reveals the retiring seed. Deliberately **not** gated by `Idempotency-Key`: unlike `/plays`, a rotate is meant to always produce a genuinely new seed, never replay a cached one.
+- `GET  /api/v1/clients/{clientId}/fairness/history` — retired seeds, newest first
 - `GET  /health` — checks database connectivity via `pool.Ping`
+
+The three `fairness/*` endpoints return `404 FAIRNESS_DISABLED` when `PROVABLY_FAIR_ENABLED=false`.
 
 This mirror sends a permissive `Access-Control-Allow-Origin: *` (see `withCORS` in `internal/transport/http/router.go`), since the frontend fetches `GET /api/v1/clients` directly from its own origin. Safe here because the mirror is already auth-less by design (an explicit assessment-scope simplification, not specific to this endpoint — see "Assumptions and trade-offs"); a production deployment would restrict it to the frontend's actual origin(s).
 
@@ -284,6 +316,8 @@ npm run dev   # http://localhost:5173
 
 The dev server defaults to `:5173` specifically so it doesn't collide with the backend's own default `:8080` (see `frontend/vite.config.ts`) — both can run side by side locally. The UI's "Game server" field lets you point it at any backend URL at runtime; its build-time default is `ws://localhost:8080/ws`, overridable via `VITE_DICE_SERVER_URL` (see `frontend/.env.example`) for pointing a deployed build at a deployed backend.
 
+When the backend has [provably fair](#provably-fair-rolls) on, a "Provably fair" panel appears after connecting: the current commitment (`seed.get`), a "Reveal seed & start a new one" button (`seed.rotate`, with an optional field to supply your own client seed), and — once a seed is revealed — a "Verify" button per round. That button calls `frontend/src/lib/verify-fairness.ts`, which recomputes the roll with the browser's own Web Crypto API; it never asks this server to confirm its own answer. If the backend has the feature off, `seed.get` fails with `FAIRNESS_DISABLED` and the panel simply doesn't render — no separate frontend flag to keep in sync.
+
 ### How to add a new client
 
 There is no "create client" API, on either transport, anywhere in this project — the player picker only ever shows whoever already exists. To add one:
@@ -303,11 +337,11 @@ make cover               # coverage.html
 make lint                # golangci-lint run
 ```
 
-- **Domain** (`internal/domain`): `IsWin` for all 6 faces × both bet types, payout math, `Wallet.Debit`/`Credit` invariants including int64 overflow — 100% coverage.
-- **Service** (`internal/service`, in-memory fakes + a fake `TxManager` that snapshots/restores state to simulate real rollback): every protection rule, win/loss happy paths, `EndPlay` credits 0 on a loss, calling `EndPlay` twice never double-credits, idempotent replay returns the identical response with zero side effects, the idempotency-conflict retry path, repository failures propagating as `INTERNAL_ERROR`, rollback on a mid-transaction failure — 86% coverage.
-- **Repository integration** (`internal/repository/postgres`, testcontainers): CRUD, `FOR UPDATE` row-lock blocking behavior (proven by racing two transactions), the partial unique index rejecting a second OPEN play, the balance check constraint, ledger uniqueness, Postgres error → domain error mapping.
-- **Concurrency** (`test/e2e`, real Postgres, `-race`): 20 goroutines firing `Play` for the same client — exactly one succeeds, the other 19 get `PLAY_ALREADY_IN_PROGRESS`, and the balance/ledger reflect exactly one debit. Same pattern for `EndPlay` (credited exactly once).
-- **Transport**: WebSocket integration tests via `httptest.Server` + a real `gorilla/websocket` client (full flow, malformed JSON, unknown type, oversized message, connection stays open after a recoverable error, graceful `Shutdown`). HTTP handler tests via `httptest.ResponseRecorder` covering every status code mapping, `GET /api/v1/clients`, and the CORS preflight/header behavior described above.
+- **Domain** (`internal/domain`): `IsWin` for all 6 faces × both bet types, payout math, `Wallet.Debit`/`Credit` invariants including int64 overflow, `ComputeRoll` against fixed golden vectors (the same values the frontend's independent Web Crypto reimplementation was checked against) — ~98% coverage.
+- **Service** (`internal/service`, in-memory fakes + a fake `TxManager` that snapshots/restores state to simulate real rollback): every protection rule, win/loss happy paths, `EndPlay` credits 0 on a loss, calling `EndPlay` twice never double-credits, idempotent replay returns the identical response with zero side effects, the idempotency-conflict retry path, repository failures propagating as `INTERNAL_ERROR`, rollback on a mid-transaction failure, and — for provably fair — seed creation/rotation/history, the revealed seed re-hashing to its originally published commitment, nonce sequencing across plays, and `Play` with fairness disabled being byte-for-byte the pre-feature behavior — 86% coverage.
+- **Repository integration** (`internal/repository/postgres`, testcontainers): CRUD, `FOR UPDATE` row-lock blocking behavior for both wallets and fairness seeds (each proven by racing two transactions), the partial unique index rejecting a second OPEN play (and, separately, a second active seed), the balance check constraint, ledger uniqueness, Postgres error → domain error mapping.
+- **Concurrency** (`test/e2e`, real Postgres, `-race`): 20 goroutines firing `Play` for the same client — exactly one succeeds, the other 19 get `PLAY_ALREADY_IN_PROGRESS`, and the balance/ledger reflect exactly one debit. Same pattern for `EndPlay` (credited exactly once). A parallel fairness-specific version of this same race additionally asserts the seed's nonce in real Postgres advances by exactly one, never more — proving no phantom increment survives a losing, rolled-back attempt. A separate happy-path e2e test plays twice, rotates, and independently re-derives both rolls from the now-revealed seed via `domain.ComputeRoll`, with no shortcuts back into the service under test.
+- **Transport**: WebSocket integration tests via `httptest.Server` + a real `gorilla/websocket` client (full flow, malformed JSON, unknown type, oversized message, connection stays open after a recoverable error, graceful `Shutdown`, the full `seed.get`/`seed.rotate`/`seed.history` flow). HTTP handler tests via `httptest.ResponseRecorder` covering every status code mapping, `GET /api/v1/clients`, the CORS preflight/header behavior described above, and the `fairness/*` endpoints including the `404 FAIRNESS_DISABLED` path when the feature is off.
 
 ### Testing the WebSocket endpoint manually
 
@@ -322,6 +356,12 @@ make lint                # golangci-lint run
 ```json
 {"type":"play.end","requestId":"33333333-3333-4333-8333-333333333333","payload":{"clientId":"alice"}}
 ```
+```json
+{"type":"seed.get","requestId":"44444444-4444-4444-8444-444444444444","payload":{"clientId":"alice"}}
+```
+```json
+{"type":"seed.rotate","requestId":"55555555-5555-4555-8555-555555555555","payload":{"clientId":"alice"}}
+```
 
 **With `websocat`** (`brew install websocat`, optional convenience — not required for anything in this repo):
 
@@ -332,7 +372,7 @@ websocat ws://localhost:8080/ws
 
 ### Postman collection
 
-`postman/dice-game.postman_collection.json` — import it, set the `baseUrl` and `clientId` collection variables (defaults: `http://localhost:8080`, `alice`), run the **Happy Path** folder (Clients → Wallet → Play → EndPlay → Wallet, with assertions on status/schema/balance math) and the **Protections** folder (bet above balance, zero/negative bet, invalid bet type, play while one is open, end play with none open, unknown client, replayed idempotency key). A pre-request script generates a fresh UUID `Idempotency-Key` for every request.
+`postman/dice-game.postman_collection.json` — import it, set the `baseUrl` and `clientId` collection variables (defaults: `http://localhost:8080`, `alice`), run the **Happy Path** folder (Clients → Wallet → Play → EndPlay → Wallet, with assertions on status/schema/balance math), the **Protections** folder (bet above balance, zero/negative bet, invalid bet type, play while one is open, end play with none open, unknown client, replayed idempotency key), and the **Provably Fair** folder (get the commitment, rotate to reveal it, assert the revealed seed's hash matches what was published, then confirm it shows up in history — tolerant of `PROVABLY_FAIR_ENABLED=false`, where it just checks for a clean `404`). A pre-request script generates a fresh UUID `Idempotency-Key` for every request.
 
 ## Assumptions and trade-offs
 
@@ -357,6 +397,6 @@ websocat ws://localhost:8080/ws
 
 ## Configuration
 
-All via environment variables (see `.env.example` for defaults): `PORT`, `DATABASE_URL`, `DB_MAX_CONNS`, `MIN_BET`, `MAX_BET`, `RUN_MIGRATIONS`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `WS_PING_INTERVAL`, `WS_MAX_MESSAGE_BYTES`, `WALLET_CACHE_TTL`.
+All via environment variables (see `.env.example` for defaults): `PORT`, `DATABASE_URL`, `DB_MAX_CONNS`, `MIN_BET`, `MAX_BET`, `RUN_MIGRATIONS`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `WS_PING_INTERVAL`, `WS_MAX_MESSAGE_BYTES`, `WALLET_CACHE_TTL`, `PROVABLY_FAIR_ENABLED`.
 
 `READ_TIMEOUT`/`WRITE_TIMEOUT` govern the plain `http.Server` only (the HTTP mirror's per-request timeouts); they do **not** apply to the WebSocket connection's read deadline, which is instead derived as `2 × WS_PING_INTERVAL` in `cmd/server/main.go`. Reusing the HTTP timeout for WS idle tolerance was a real bug caught during integration testing: with the defaults at the time (`READ_TIMEOUT=15s`, `WS_PING_INTERVAL=30s`), every idle WS connection's read deadline expired before its first keepalive ping could ever arrive, silently killing the connection after ~15s of inactivity (e.g. a player sitting on an open round). Keep this in mind if you ever change `WS_PING_INTERVAL`: the read deadline tracks it automatically, but a *very* long ping interval still means a *very* long tolerance for a genuinely dead connection going undetected.

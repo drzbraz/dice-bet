@@ -13,22 +13,28 @@ import (
 
 // Message types understood by the WebSocket transport.
 const (
-	TypeWalletGet = "wallet.get"
-	TypePlayStart = "play.start"
-	TypePlayEnd   = "play.end"
+	TypeWalletGet   = "wallet.get"
+	TypePlayStart   = "play.start"
+	TypePlayEnd     = "play.end"
+	TypeSeedGet     = "seed.get"
+	TypeSeedRotate  = "seed.rotate"
+	TypeSeedHistory = "seed.history"
 )
 
-// Controller adapts WalletService/GameService to WS message Handlers,
-// decoding request DTOs and encoding response DTOs. It contains no
-// business logic of its own.
+// Controller adapts WalletService/GameService/FairnessService to WS
+// message Handlers, decoding request DTOs and encoding response DTOs. It
+// contains no business logic of its own. fairness may be nil
+// (PROVABLY_FAIR_ENABLED=false): the seed.* handlers then report
+// FAIRNESS_DISABLED instead of panicking on a nil pointer.
 type Controller struct {
-	wallet *service.WalletService
-	game   *service.GameService
+	wallet   *service.WalletService
+	game     *service.GameService
+	fairness *service.FairnessService
 }
 
 // NewController constructs a Controller.
-func NewController(wallet *service.WalletService, game *service.GameService) *Controller {
-	return &Controller{wallet: wallet, game: game}
+func NewController(wallet *service.WalletService, game *service.GameService, fairness *service.FairnessService) *Controller {
+	return &Controller{wallet: wallet, game: game, fairness: fairness}
 }
 
 // RegisterRoutes registers every known message type's handler on r.
@@ -36,6 +42,9 @@ func (c *Controller) RegisterRoutes(r *Router) {
 	r.Register(TypeWalletGet, c.HandleWalletGet)
 	r.Register(TypePlayStart, c.HandlePlayStart)
 	r.Register(TypePlayEnd, c.HandlePlayEnd)
+	r.Register(TypeSeedGet, c.HandleSeedGet)
+	r.Register(TypeSeedRotate, c.HandleSeedRotate)
+	r.Register(TypeSeedHistory, c.HandleSeedHistory)
 }
 
 // HandleWalletGet implements the wallet.get use case.
@@ -95,6 +104,69 @@ func (c *Controller) HandlePlayEnd(ctx context.Context, requestID string, payloa
 		return nil, err
 	}
 	return dto.NewEndPlayResponse(outcome), nil
+}
+
+// HandleSeedGet implements the seed.get use case: a client's current,
+// safe-to-publish commitment (never the secret serverSeed).
+func (c *Controller) HandleSeedGet(ctx context.Context, requestID string, payload json.RawMessage) (any, error) {
+	if c.fairness == nil {
+		return nil, domain.ErrFairnessDisabled()
+	}
+	var req dto.SeedGetRequest
+	if err := decodePayload(payload, &req); err != nil {
+		return nil, err
+	}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
+	seed, err := c.fairness.GetSeed(ctx, req.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	return dto.NewSeedResponse(seed), nil
+}
+
+// HandleSeedRotate implements the seed.rotate use case: retires the
+// client's active seed (revealing it) and activates a new one.
+func (c *Controller) HandleSeedRotate(ctx context.Context, requestID string, payload json.RawMessage) (any, error) {
+	if c.fairness == nil {
+		return nil, domain.ErrFairnessDisabled()
+	}
+	var req dto.SeedRotateRequest
+	if err := decodePayload(payload, &req); err != nil {
+		return nil, err
+	}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
+	result, err := c.fairness.RotateSeed(ctx, req.ClientID, req.ClientSeed)
+	if err != nil {
+		return nil, err
+	}
+	return dto.NewSeedRotateResponse(result), nil
+}
+
+// HandleSeedHistory implements the seed.history use case: a client's
+// retired seeds, newest first, each fully revealed and re-verifiable.
+func (c *Controller) HandleSeedHistory(ctx context.Context, requestID string, payload json.RawMessage) (any, error) {
+	if c.fairness == nil {
+		return nil, domain.ErrFairnessDisabled()
+	}
+	var req dto.SeedGetRequest
+	if err := decodePayload(payload, &req); err != nil {
+		return nil, err
+	}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
+	history, err := c.fairness.History(ctx, req.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	return dto.NewSeedHistoryResponse(history), nil
 }
 
 // decodePayload strictly decodes payload into target, rejecting unknown

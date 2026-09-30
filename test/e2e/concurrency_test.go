@@ -38,6 +38,7 @@ func TestConcurrency_Play_ExactlyOneSucceedsPerClient(t *testing.T) {
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
 		walletCache,
+		nil,
 		config.GameConfig{MinBet: 1, MaxBet: 100_000_00},
 	)
 
@@ -101,6 +102,7 @@ func TestConcurrency_EndPlay_CreditedExactlyOnce(t *testing.T) {
 		random.NewCryptoRoller(),
 		postgres.NewTxManager(pool),
 		walletCache,
+		nil,
 		config.GameConfig{MinBet: 1, MaxBet: 100_000_00},
 	)
 

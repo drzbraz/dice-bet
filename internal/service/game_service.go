@@ -46,6 +46,21 @@ type PlayOutcome struct {
 	Payout       int64             `json:"payout"`
 	Status       domain.PlayStatus `json:"status"`
 	Balance      int64             `json:"balance"`
+
+	// Fairness is set only when PROVABLY_FAIR_ENABLED is on (i.e.
+	// GameService was constructed with a non-nil FairnessService); nil
+	// otherwise. See README "Provably fair rolls".
+	Fairness *PlayFairness `json:"fairness,omitempty"`
+}
+
+// PlayFairness is enough for a player to later verify this specific roll
+// once the seed epoch it was played under is revealed (via seed.rotate):
+// recompute domain.ComputeRoll(revealedServerSeed, ClientSeed, Nonce) and
+// confirm it equals RolledNumber above.
+type PlayFairness struct {
+	ServerSeedHash string `json:"serverSeedHash"`
+	ClientSeed     string `json:"clientSeed"`
+	Nonce          int64  `json:"nonce"`
 }
 
 // EndPlayRequest is the input to the EndPlay use case.
@@ -73,6 +88,7 @@ type GameService struct {
 	roller       port.DiceRoller
 	txManager    port.TxManager
 	cache        port.WalletBalanceCache
+	fairness     *FairnessService
 	cfg          config.GameConfig
 
 	now         func() time.Time
@@ -81,7 +97,10 @@ type GameService struct {
 }
 
 // NewGameService constructs a GameService with production defaults for
-// clock, ID generation, and idempotency-conflict backoff.
+// clock, ID generation, and idempotency-conflict backoff. fairness may be
+// nil (PROVABLY_FAIR_ENABLED=false): Play then rolls via roller exactly as
+// it always has, and PlayOutcome.Fairness is left nil -- see README
+// "Provably fair rolls" for why this is fully additive.
 func NewGameService(
 	wallets port.WalletRepository,
 	plays port.PlayRepository,
@@ -90,6 +109,7 @@ func NewGameService(
 	roller port.DiceRoller,
 	txManager port.TxManager,
 	cache port.WalletBalanceCache,
+	fairness *FairnessService,
 	cfg config.GameConfig,
 ) *GameService {
 	return &GameService{
@@ -100,6 +120,7 @@ func NewGameService(
 		roller:       roller,
 		txManager:    txManager,
 		cache:        cache,
+		fairness:     fairness,
 		cfg:          cfg,
 		now:          time.Now,
 		newID:        uuid.NewString,
@@ -146,9 +167,9 @@ func (s *GameService) Play(ctx context.Context, req PlayRequest) (*PlayOutcome, 
 				return nil, domain.ErrInsufficientBalance()
 			}
 
-			rolled, err := s.roller.Roll(ctx)
+			rolled, fairness, err := s.roll(ctx, req.ClientID)
 			if err != nil {
-				return nil, domain.ErrInternal(err)
+				return nil, err
 			}
 			result := domain.Result(rolled, req.BetType)
 			payout := domain.Payout(req.BetAmount, result)
@@ -189,6 +210,7 @@ func (s *GameService) Play(ctx context.Context, req PlayRequest) (*PlayOutcome, 
 				Payout:       payout,
 				Status:       play.Status,
 				Balance:      wallet.Balance,
+				Fairness:     fairness,
 			}, nil
 		},
 	)
@@ -260,6 +282,28 @@ func (s *GameService) EndPlay(ctx context.Context, req EndPlayRequest) (*EndPlay
 	}
 	s.refreshCache(ctx, req.ClientID)
 	return outcome, nil
+}
+
+// roll produces the next die roll for clientID. When provably-fair is
+// enabled (s.fairness != nil) it derives the roll deterministically from
+// the client's active seed, inside the ambient transaction Play is already
+// running in -- so the seed's nonce increment commits or rolls back
+// atomically with the wallet debit alongside it, the same way the wallet
+// row lock does. Otherwise it falls back to the plain crypto/rand roller
+// exactly as before this feature existed.
+func (s *GameService) roll(ctx context.Context, clientID string) (int, *PlayFairness, error) {
+	if s.fairness == nil {
+		rolled, err := s.roller.Roll(ctx)
+		if err != nil {
+			return 0, nil, domain.ErrInternal(err)
+		}
+		return rolled, nil, nil
+	}
+	rolled, nonce, serverSeedHash, clientSeed, err := s.fairness.RollFor(ctx, clientID)
+	if err != nil {
+		return 0, nil, err
+	}
+	return rolled, &PlayFairness{ServerSeedHash: serverSeedHash, ClientSeed: clientSeed, Nonce: nonce}, nil
 }
 
 // refreshCache re-reads clientID's wallet and writes it through to the

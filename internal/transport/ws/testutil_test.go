@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -142,6 +143,78 @@ type fixedRoller struct{ value int }
 
 func (r fixedRoller) Roll(ctx context.Context) (int, error) { return r.value, nil }
 
+// fakeFairnessRepository is a minimal in-memory port.FairnessRepository
+// for the fairness/* transport tests -- see newTestServerWithFairness.
+type fakeFairnessRepository struct {
+	mu      sync.Mutex
+	active  map[string]domain.FairnessSeed
+	retired map[string][]domain.FairnessSeed
+}
+
+func newFakeFairnessRepository() *fakeFairnessRepository {
+	return &fakeFairnessRepository{active: map[string]domain.FairnessSeed{}, retired: map[string][]domain.FairnessSeed{}}
+}
+
+func (r *fakeFairnessRepository) GetActiveForUpdate(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) Create(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.active[seed.ClientID] = *seed
+	return nil
+}
+
+func (r *fakeFairnessRepository) IncrementNonce(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.active[seed.ClientID]
+	s.Nonce = seed.Nonce
+	r.active[seed.ClientID] = s
+	return nil
+}
+
+func (r *fakeFairnessRepository) Retire(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	now := time.Now()
+	s.RetiredAt = &now
+	delete(r.active, clientID)
+	r.retired[clientID] = append([]domain.FairnessSeed{s}, r.retired[clientID]...)
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) ListRetired(ctx context.Context, clientID string) ([]domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]domain.FairnessSeed(nil), r.retired[clientID]...), nil
+}
+
+type fakeSeedGenerator struct{ n int }
+
+func (g *fakeSeedGenerator) GenerateServerSeed() (string, error) {
+	g.n++
+	return fmt.Sprintf("fake-server-seed-%d", g.n), nil
+}
+
+func (g *fakeSeedGenerator) GenerateClientSeed() (string, error) {
+	g.n++
+	return fmt.Sprintf("fake-client-seed-%d", g.n), nil
+}
+
 // testServer bundles an httptest.Server exposing /ws and the underlying
 // store, so tests can seed data and assert on it after exchanging messages.
 type testServer struct {
@@ -157,6 +230,23 @@ func (s *testServer) wsURL() string {
 
 func newTestServer(t *testing.T, cfg Config) *testServer {
 	t.Helper()
+	return newTestServerWith(t, cfg, nil)
+}
+
+// newTestServerWithFairness is newTestServer with PROVABLY_FAIR_ENABLED
+// effectively on, for the seed.get/seed.rotate/seed.history tests. Kept
+// separate from newTestServer so the existing fixedRoller-based suite
+// keeps its deterministic (always-even) rolls: enabling fairness there
+// would silently switch those rolls over to the HMAC-derived ones instead,
+// breaking unrelated assertions on rolledNumber/result.
+func newTestServerWithFairness(t *testing.T, cfg Config) (*testServer, *service.FairnessService) {
+	t.Helper()
+	fairnessSvc := service.NewFairnessService(newFakeFairnessRepository(), &fakeSeedGenerator{}, memTxManager{})
+	return newTestServerWith(t, cfg, fairnessSvc), fairnessSvc
+}
+
+func newTestServerWith(t *testing.T, cfg Config, fairnessSvc *service.FairnessService) *testServer {
+	t.Helper()
 	store := newMemStore()
 	store.wallets["alice"] = domain.Wallet{ClientID: "alice", Balance: 1000, Currency: "EUR"}
 
@@ -170,10 +260,11 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 		fixedRoller{value: 4}, // even
 		memTxManager{},
 		walletCache,
+		fairnessSvc,
 		config.GameConfig{MinBet: 1, MaxBet: 100000},
 	)
 
-	controller := NewController(walletSvc, gameSvc)
+	controller := NewController(walletSvc, gameSvc, fairnessSvc)
 	router := NewRouter()
 	controller.RegisterRoutes(router)
 

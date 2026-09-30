@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
@@ -149,9 +150,110 @@ func newTestRouter(pingErr error) http.Handler {
 		fixedRoller{value: 4}, // even
 		memTxManager{},
 		walletCache,
+		nil,
 		config.GameConfig{MinBet: 1, MaxBet: 100000},
 	)
 
-	controller := NewController(walletSvc, gameSvc)
+	controller := NewController(walletSvc, gameSvc, nil)
 	return NewRouter(controller, func(ctx context.Context) error { return pingErr })
+}
+
+// fakeFairnessRepository and fakeSeedGenerator back newTestRouterWithFairness,
+// separate from newTestRouter above so the existing fixedRoller-based test
+// suite keeps its deterministic (always-even) rolls: enabling fairness
+// there would silently switch those rolls over to the HMAC-derived ones
+// below instead, breaking unrelated assertions on rolledNumber/result.
+type fakeFairnessRepository struct {
+	mu      sync.Mutex
+	active  map[string]domain.FairnessSeed
+	retired map[string][]domain.FairnessSeed
+}
+
+func newFakeFairnessRepository() *fakeFairnessRepository {
+	return &fakeFairnessRepository{active: map[string]domain.FairnessSeed{}, retired: map[string][]domain.FairnessSeed{}}
+}
+
+func (r *fakeFairnessRepository) GetActiveForUpdate(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) Create(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.active[seed.ClientID] = *seed
+	return nil
+}
+
+func (r *fakeFairnessRepository) IncrementNonce(ctx context.Context, seed *domain.FairnessSeed) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.active[seed.ClientID]
+	s.Nonce = seed.Nonce
+	r.active[seed.ClientID] = s
+	return nil
+}
+
+func (r *fakeFairnessRepository) Retire(ctx context.Context, clientID string) (*domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.active[clientID]
+	if !ok {
+		return nil, nil
+	}
+	now := time.Now()
+	s.RetiredAt = &now
+	delete(r.active, clientID)
+	r.retired[clientID] = append([]domain.FairnessSeed{s}, r.retired[clientID]...)
+	cp := s
+	return &cp, nil
+}
+
+func (r *fakeFairnessRepository) ListRetired(ctx context.Context, clientID string) ([]domain.FairnessSeed, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]domain.FairnessSeed(nil), r.retired[clientID]...), nil
+}
+
+type fakeSeedGenerator struct{ n int }
+
+func (g *fakeSeedGenerator) GenerateServerSeed() (string, error) {
+	g.n++
+	return fmt.Sprintf("fake-server-seed-%d", g.n), nil
+}
+
+func (g *fakeSeedGenerator) GenerateClientSeed() (string, error) {
+	g.n++
+	return fmt.Sprintf("fake-client-seed-%d", g.n), nil
+}
+
+// newTestRouterWithFairness is newTestRouter with PROVABLY_FAIR_ENABLED
+// effectively on, for the fairness/* endpoint tests.
+func newTestRouterWithFairness() http.Handler {
+	store := newMemStore()
+	store.wallets["alice"] = domain.Wallet{ClientID: "alice", Balance: 1000, Currency: "EUR"}
+
+	walletCache := cache.NewMemoryCache(time.Minute)
+	walletSvc := service.NewWalletService(&memWalletRepo{store: store}, walletCache)
+	fairnessSvc := service.NewFairnessService(newFakeFairnessRepository(), &fakeSeedGenerator{}, memTxManager{})
+	gameSvc := service.NewGameService(
+		&memWalletRepo{store: store},
+		&memPlayRepo{store: store},
+		memTxRepo{},
+		&memIdemRepo{store: store},
+		fixedRoller{value: 4},
+		memTxManager{},
+		walletCache,
+		fairnessSvc,
+		config.GameConfig{MinBet: 1, MaxBet: 100000},
+	)
+
+	controller := NewController(walletSvc, gameSvc, fairnessSvc)
+	return NewRouter(controller, func(ctx context.Context) error { return nil })
 }

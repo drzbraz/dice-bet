@@ -14,6 +14,13 @@ export type WalletData = {
   currency: string;
 };
 
+/** Present on PlayStartData only when the server has PROVABLY_FAIR_ENABLED=true. */
+export type PlayFairness = {
+  serverSeedHash: string;
+  clientSeed: string;
+  nonce: number;
+};
+
 export type PlayStartData = {
   playId: string;
   clientId: string;
@@ -24,6 +31,28 @@ export type PlayStartData = {
   payout: number;
   status: string;
   balance: number;
+  fairness?: PlayFairness;
+};
+
+export type SeedData = {
+  clientId: string;
+  serverSeedHash: string;
+  clientSeed: string;
+  nonce: number;
+};
+
+export type RetiredSeed = {
+  clientId: string;
+  serverSeed: string;
+  serverSeedHash: string;
+  clientSeed: string;
+  finalNonce: number;
+  retiredAt: string;
+};
+
+export type SeedRotateData = {
+  retired?: RetiredSeed;
+  active: SeedData;
 };
 
 export type PlayEndData = {
@@ -187,6 +216,24 @@ export class DiceClient {
   endPlay(clientId: string) {
     return this.send<PlayEndData>("play.end", { clientId });
   }
+
+  /** Current, safe-to-publish commitment. Throws DiceError("FAIRNESS_DISABLED", ...) if the server has the feature off. */
+  getSeed(clientId: string) {
+    return this.send<SeedData>("seed.get", { clientId });
+  }
+
+  /** Retires the active seed (revealing it) and activates a new one. clientSeed is optional. */
+  rotateSeed(clientId: string, clientSeed?: string) {
+    return this.send<SeedRotateData>(
+      "seed.rotate",
+      clientSeed ? { clientId, clientSeed } : { clientId },
+    );
+  }
+
+  /** Past, fully revealed seed epochs, newest first. */
+  getSeedHistory(clientId: string) {
+    return this.send<{ seeds: RetiredSeed[] }>("seed.history", { clientId });
+  }
 }
 
 /** Money is int64 minor units (cents) on the backend. */
@@ -212,7 +259,10 @@ function httpBaseFromWsUrl(wsUrl: string): string {
 export async function fetchClients(wsUrl: string): Promise<string[]> {
   const res = await fetch(`${httpBaseFromWsUrl(wsUrl)}/api/v1/clients`);
   if (!res.ok) {
-    throw new DiceError("CONNECTION_FAILED", `Could not load the player list (HTTP ${res.status}).`);
+    throw new DiceError(
+      "CONNECTION_FAILED",
+      `Could not load the player list (HTTP ${res.status}).`,
+    );
   }
   const body = (await res.json()) as { data?: { clients?: string[] } };
   return body.data?.clients ?? [];

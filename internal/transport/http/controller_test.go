@@ -312,3 +312,172 @@ func TestHTTP_Health_Unavailable(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
+
+func TestHTTP_GetSeed_WhenFairnessDisabled_Returns404(t *testing.T) {
+	router := newTestRouter(nil) // fairness is nil in the plain test router
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/seed", nil, nil)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp struct {
+		Error struct{ Code string }
+	}
+	decodeBody(t, rec, &resp)
+	assert.Equal(t, "FAIRNESS_DISABLED", resp.Error.Code)
+}
+
+func TestHTTP_PostRotateSeed_WhenFairnessDisabled_Returns404(t *testing.T) {
+	router := newTestRouter(nil)
+
+	rec := doRequest(t, router, http.MethodPost, "/api/v1/clients/alice/fairness/rotate", nil, nil)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHTTP_GetSeed_ReturnsCommitmentAndCreatesOnFirstUse(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/seed", nil, nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Success bool
+		Data    struct {
+			ClientID       string
+			ServerSeedHash string
+			ClientSeed     string
+			Nonce          int64
+		}
+	}
+	decodeBody(t, rec, &resp)
+	assert.True(t, resp.Success)
+	assert.Equal(t, "alice", resp.Data.ClientID)
+	assert.NotEmpty(t, resp.Data.ServerSeedHash)
+	assert.NotEmpty(t, resp.Data.ClientSeed)
+	assert.Equal(t, int64(0), resp.Data.Nonce)
+}
+
+func TestHTTP_PostRotateSeed_RevealsOldSeedAndItsHashMatchesTheOriginalCommitment(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	seedRec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/seed", nil, nil)
+	var seedResp struct {
+		Data struct{ ServerSeedHash string }
+	}
+	decodeBody(t, seedRec, &seedResp)
+
+	rotateRec := doRequest(t, router, http.MethodPost, "/api/v1/clients/alice/fairness/rotate", nil, nil)
+
+	assert.Equal(t, http.StatusOK, rotateRec.Code)
+	var rotateResp struct {
+		Data struct {
+			Retired struct {
+				ServerSeed     string
+				ServerSeedHash string
+			}
+			Active struct{ ServerSeedHash string }
+		}
+	}
+	decodeBody(t, rotateRec, &rotateResp)
+	assert.Equal(t, seedResp.Data.ServerSeedHash, rotateResp.Data.Retired.ServerSeedHash)
+	assert.NotEmpty(t, rotateResp.Data.Retired.ServerSeed, "the seed must now be revealed")
+	assert.NotEqual(t, rotateResp.Data.Retired.ServerSeedHash, rotateResp.Data.Active.ServerSeedHash)
+}
+
+func TestHTTP_PostRotateSeed_WithCustomClientSeed(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	rec := doRequest(t, router, http.MethodPost, "/api/v1/clients/alice/fairness/rotate",
+		map[string]string{"Content-Type": "application/json"},
+		map[string]any{"clientSeed": "player-chosen-seed"},
+	)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Active struct{ ClientSeed string }
+		}
+	}
+	decodeBody(t, rec, &resp)
+	assert.Equal(t, "player-chosen-seed", resp.Data.Active.ClientSeed)
+}
+
+func TestHTTP_PostRotateSeed_MalformedBodyReturns400(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/alice/fairness/rotate", bytes.NewReader([]byte(`{not valid`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp struct {
+		Error struct{ Code string }
+	}
+	decodeBody(t, rec, &resp)
+	assert.Equal(t, "INVALID_MESSAGE", resp.Error.Code)
+}
+
+func TestHTTP_GetSeedHistory_WhenFairnessDisabled_Returns404(t *testing.T) {
+	router := newTestRouter(nil)
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/history", nil, nil)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHTTP_GetSeedHistory_EmptyBeforeAnyRotation(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/history", nil, nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Seeds []struct{ ServerSeed string }
+		}
+	}
+	decodeBody(t, rec, &resp)
+	assert.Empty(t, resp.Data.Seeds)
+}
+
+func TestHTTP_GetSeedHistory_ReturnsRetiredSeedsAfterRotation(t *testing.T) {
+	router := newTestRouterWithFairness()
+	_ = doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/seed", nil, nil)
+	_ = doRequest(t, router, http.MethodPost, "/api/v1/clients/alice/fairness/rotate", nil, nil)
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients/alice/fairness/history", nil, nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Seeds []struct{ ServerSeed string }
+		}
+	}
+	decodeBody(t, rec, &resp)
+	require.Len(t, resp.Data.Seeds, 1)
+	assert.NotEmpty(t, resp.Data.Seeds[0].ServerSeed)
+}
+
+func TestHTTP_PlayStart_WithFairnessEnabled_IncludesFairnessInResponse(t *testing.T) {
+	router := newTestRouterWithFairness()
+
+	rec := doRequest(t, router, http.MethodPost, "/api/v1/plays",
+		map[string]string{"Idempotency-Key": uuid.NewString(), "Content-Type": "application/json"},
+		map[string]any{"clientId": "alice", "betAmount": 100, "betType": "EVEN"},
+	)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Fairness struct {
+				ServerSeedHash string
+				ClientSeed     string
+				Nonce          int64
+			}
+		}
+	}
+	decodeBody(t, rec, &resp)
+	assert.NotEmpty(t, resp.Data.Fairness.ServerSeedHash)
+	assert.Equal(t, int64(0), resp.Data.Fairness.Nonce)
+}

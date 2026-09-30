@@ -64,7 +64,7 @@ func setupTestPool(t *testing.T) *pgxpool.Pool {
 func truncateAll(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
-		`TRUNCATE idempotency_keys, wallet_transactions, plays, wallets, clients RESTART IDENTITY CASCADE`)
+		`TRUNCATE idempotency_keys, fairness_seeds, wallet_transactions, plays, wallets, clients RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}

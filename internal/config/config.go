@@ -28,6 +28,14 @@ type Config struct {
 	// on commit, so this is a defense-in-depth backstop, not the primary
 	// freshness mechanism -- see WalletBalanceCache.
 	WalletCacheTTL time.Duration
+
+	// ProvablyFairEnabled switches Play's roll derivation from plain
+	// crypto/rand to the deterministic commit-reveal scheme in
+	// internal/service/fairness_service.go, and turns on the seed.get/
+	// seed.rotate/seed.history endpoints. Fully additive: false is
+	// byte-for-byte the pre-existing behavior -- see README "Provably fair
+	// rolls".
+	ProvablyFairEnabled bool
 }
 
 // GameConfig holds the betting limits enforced by the game service. It is
@@ -55,6 +63,8 @@ func Load() (Config, error) {
 		WSPingInterval:    getEnvDuration("WS_PING_INTERVAL", 30*time.Second),
 		WSMaxMessageBytes: getEnvInt64("WS_MAX_MESSAGE_BYTES", 4096),
 		WalletCacheTTL:    getEnvDuration("WALLET_CACHE_TTL", 30*time.Second),
+
+		ProvablyFairEnabled: getEnvBool("PROVABLY_FAIR_ENABLED", true),
 	}
 
 	if err := cfg.validate(); err != nil {

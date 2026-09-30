@@ -35,11 +35,25 @@ type PlayStartResponse struct {
 	Payout       int64  `json:"payout"`
 	Status       string `json:"status"`
 	Balance      int64  `json:"balance"`
+
+	// Fairness is present only when PROVABLY_FAIR_ENABLED is on. See
+	// README "Provably fair rolls".
+	Fairness *PlayFairnessResponse `json:"fairness,omitempty"`
+}
+
+// PlayFairnessResponse is enough to later verify RolledNumber once the
+// seed epoch it was played under is revealed (via seed.rotate): recompute
+// the roll from the revealed serverSeed, ClientSeed, and Nonce and confirm
+// it matches.
+type PlayFairnessResponse struct {
+	ServerSeedHash string `json:"serverSeedHash"`
+	ClientSeed     string `json:"clientSeed"`
+	Nonce          int64  `json:"nonce"`
 }
 
 // NewPlayStartResponse maps a service.PlayOutcome to its wire DTO.
 func NewPlayStartResponse(o *service.PlayOutcome) PlayStartResponse {
-	return PlayStartResponse{
+	resp := PlayStartResponse{
 		PlayID:       o.PlayID,
 		ClientID:     o.ClientID,
 		BetAmount:    o.BetAmount,
@@ -50,4 +64,12 @@ func NewPlayStartResponse(o *service.PlayOutcome) PlayStartResponse {
 		Status:       string(o.Status),
 		Balance:      o.Balance,
 	}
+	if o.Fairness != nil {
+		resp.Fairness = &PlayFairnessResponse{
+			ServerSeedHash: o.Fairness.ServerSeedHash,
+			ClientSeed:     o.Fairness.ClientSeed,
+			Nonce:          o.Fairness.Nonce,
+		}
+	}
+	return resp
 }

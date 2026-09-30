@@ -487,6 +487,106 @@
       ]
     },
     {
+      "name": "Provably Fair",
+      "item": [
+        {
+          "name": "1. Get Seed",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/{{clientId}}/fairness/seed",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "clients", "{{clientId}}", "fairness", "seed"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 (or 404 FAIRNESS_DISABLED if the feature is off)', () => {",
+                  "    pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.test('has serverSeedHash and clientSeed', () => {",
+                  "        pm.expect(body.data.serverSeedHash).to.be.a('string').with.length(64);",
+                  "        pm.expect(body.data.clientSeed).to.be.a('string');",
+                  "    });",
+                  "    pm.collectionVariables.set('fairnessCommitment', body.data.serverSeedHash);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. Rotate Seed",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/{{clientId}}/fairness/rotate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "clients", "{{clientId}}", "fairness", "rotate"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    const publishedHash = pm.collectionVariables.get('fairnessCommitment');",
+                  "    pm.test('the revealed seed matches the commitment published by step 1', () => {",
+                  "        pm.expect(body.data.retired.serverSeedHash).to.eql(publishedHash);",
+                  "        pm.expect(body.data.retired.serverSeed).to.be.a('string').with.length(64);",
+                  "    });",
+                  "    pm.test('the new epoch has a different commitment', () => {",
+                  "        pm.expect(body.data.active.serverSeedHash).to.not.eql(body.data.retired.serverSeedHash);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Get History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/{{clientId}}/fairness/history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "clients", "{{clientId}}", "fairness", "history"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.test('includes the seed just retired in step 2', () => {",
+                  "        pm.expect(body.data.seeds).to.be.an('array').with.lengthOf.at.least(1);",
+                  "        pm.expect(body.data.seeds[0].serverSeed).to.be.a('string');",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "Health",
       "item": [
         {

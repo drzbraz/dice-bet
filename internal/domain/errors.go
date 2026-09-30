@@ -20,6 +20,7 @@ const (
 	ErrCodeNoActivePlay          ErrorCode = "NO_ACTIVE_PLAY"
 	ErrCodeServiceUnavailable    ErrorCode = "SERVICE_UNAVAILABLE"
 	ErrCodeInternal              ErrorCode = "INTERNAL_ERROR"
+	ErrCodeFairnessDisabled      ErrorCode = "FAIRNESS_DISABLED"
 )
 
 // Error is a typed domain error carrying a stable machine-readable Code in
@@ -109,4 +110,10 @@ func ErrServiceUnavailable(cause error) *Error {
 // preserved for logging via errors.Unwrap but is never exposed to clients.
 func ErrInternal(cause error) *Error {
 	return &Error{Code: ErrCodeInternal, Message: "internal error", cause: cause}
+}
+
+// ErrFairnessDisabled reports that a provably-fair endpoint was called
+// while PROVABLY_FAIR_ENABLED is false. See README "Provably fair rolls".
+func ErrFairnessDisabled() *Error {
+	return newError(ErrCodeFairnessDisabled, "provably-fair rolls are not enabled on this server")
 }

@@ -15,6 +15,9 @@ func NewRouter(controller *Controller, pingFn func(ctx context.Context) error) h
 	mux.HandleFunc("GET /api/v1/clients/{clientId}/wallet", controller.GetWallet)
 	mux.HandleFunc("POST /api/v1/plays", controller.PostPlay)
 	mux.HandleFunc("POST /api/v1/plays/end", controller.PostEndPlay)
+	mux.HandleFunc("GET /api/v1/clients/{clientId}/fairness/seed", controller.GetSeed)
+	mux.HandleFunc("POST /api/v1/clients/{clientId}/fairness/rotate", controller.PostRotateSeed)
+	mux.HandleFunc("GET /api/v1/clients/{clientId}/fairness/history", controller.GetSeedHistory)
 	mux.HandleFunc("GET /health", healthHandler(pingFn))
 	return withCORS(mux)
 }

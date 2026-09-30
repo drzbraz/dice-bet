@@ -74,11 +74,21 @@ func run(logger *slog.Logger) error {
 	// See internal/port/cache.go for why this exists.
 	walletCache := cache.NewMemoryCache(cfg.WalletCacheTTL)
 
+	// nil when PROVABLY_FAIR_ENABLED=false: GameService.Play then rolls via
+	// roller exactly as before this feature existed. See README "Provably
+	// fair rolls".
+	var fairnessSvc *service.FairnessService
+	if cfg.ProvablyFairEnabled {
+		fairnessRepo := postgres.NewFairnessRepository(pool)
+		seedGen := random.NewCryptoSeedGenerator()
+		fairnessSvc = service.NewFairnessService(fairnessRepo, seedGen, txManager)
+	}
+
 	walletSvc := service.NewWalletService(walletRepo, walletCache)
-	gameSvc := service.NewGameService(walletRepo, playRepo, transactionRepo, idempotencyRepo, roller, txManager, walletCache, cfg.Game)
+	gameSvc := service.NewGameService(walletRepo, playRepo, transactionRepo, idempotencyRepo, roller, txManager, walletCache, fairnessSvc, cfg.Game)
 
 	wsRouter := ws.NewRouter()
-	ws.NewController(walletSvc, gameSvc).RegisterRoutes(wsRouter)
+	ws.NewController(walletSvc, gameSvc, fairnessSvc).RegisterRoutes(wsRouter)
 	wsCfg := ws.DefaultConfig()
 	wsCfg.MaxMessageBytes = cfg.WSMaxMessageBytes
 	wsCfg.PingInterval = cfg.WSPingInterval
@@ -92,7 +102,7 @@ func run(logger *slog.Logger) error {
 	wsCfg.ReadTimeout = 2 * cfg.WSPingInterval
 	wsServer := ws.NewServer(wsRouter, wsCfg, logger)
 
-	httpController := httptransport.NewController(walletSvc, gameSvc)
+	httpController := httptransport.NewController(walletSvc, gameSvc, fairnessSvc)
 	httpRouter := httptransport.NewRouter(httpController, pool.Ping)
 
 	mux := http.NewServeMux()

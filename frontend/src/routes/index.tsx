@@ -9,8 +9,12 @@ import {
   formatMoney,
   type BetType,
   type ConnectionState,
+  type PlayFairness,
   type PlayStartData,
+  type RetiredSeed,
+  type SeedData,
 } from "@/lib/dice-client";
+import { verifyRoll } from "@/lib/verify-fairness";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -70,6 +74,21 @@ function GamePage() {
   // different player was picked, or there's no connection at all).
   const [seatedClientId, setSeatedClientId] = useState<string | null>(null);
 
+  // Provably fair: null until we know (fetched right after connecting).
+  const [fairnessEnabled, setFairnessEnabled] = useState<boolean | null>(null);
+  const [seed, setSeed] = useState<SeedData | null>(null);
+  const [revealed, setRevealed] = useState<RetiredSeed | null>(null);
+  const [customClientSeed, setCustomClientSeed] = useState("");
+  const [rotating, setRotating] = useState(false);
+  const [verifiableRound, setVerifiableRound] = useState<{
+    rolledNumber: number;
+    fairness: PlayFairness;
+  } | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; computedRoll: number } | null>(
+    null,
+  );
+
   const connected = state === "open";
 
   const fail = useCallback((err: unknown) => {
@@ -115,7 +134,22 @@ function GamePage() {
       setBalance(wallet.balance);
       setCurrency(wallet.currency || "EUR");
       setPlay(null);
+      setRevealed(null);
+      setVerifiableRound(null);
+      setVerifyResult(null);
       setMessage({ tone: "info", text: `Welcome back, ${wallet.clientId}! Place your bet.` });
+
+      try {
+        const seedData = await client.getSeed(trimmedClientId);
+        setFairnessEnabled(true);
+        setSeed(seedData);
+      } catch {
+        // Either the server has PROVABLY_FAIR_ENABLED=false (FAIRNESS_DISABLED)
+        // or something else went wrong fetching it -- either way, just hide
+        // the panel rather than show a broken one.
+        setFairnessEnabled(false);
+        setSeed(null);
+      }
     } catch (err) {
       fail(err);
     } finally {
@@ -138,6 +172,11 @@ function GamePage() {
       await new Promise((r) => setTimeout(r, wait));
       setPlay(result);
       setBalance(result.balance);
+      setVerifyResult(null);
+      if (result.fairness) {
+        setVerifiableRound({ rolledNumber: result.rolledNumber, fairness: result.fairness });
+        setSeed((s) => (s ? { ...s, nonce: result.fairness!.nonce + 1 } : s));
+      }
     } catch (err) {
       fail(err);
     } finally {
@@ -179,6 +218,39 @@ function GamePage() {
       fail(err);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const rotateSeed = async () => {
+    const client = clientRef.current;
+    if (!client) return;
+    setRotating(true);
+    setMessage(null);
+    try {
+      const result = await client.rotateSeed(clientId.trim(), customClientSeed.trim() || undefined);
+      setSeed(result.active);
+      setRevealed(result.retired ?? null);
+      setCustomClientSeed("");
+      setVerifyResult(null);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const verify = async () => {
+    if (!revealed || !verifiableRound) return;
+    setVerifying(true);
+    try {
+      const computedRoll = await verifyRoll(
+        revealed.serverSeed,
+        verifiableRound.fairness.clientSeed,
+        verifiableRound.fairness.nonce,
+      );
+      setVerifyResult({ ok: computedRoll === verifiableRound.rolledNumber, computedRoll });
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -408,6 +480,91 @@ function GamePage() {
               </ul>
             )}
           </section>
+
+          {fairnessEnabled && (
+            <section className="card-soft p-5">
+              <h2 className="text-lg font-bold">Provably fair</h2>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Every roll is HMAC-SHA256(serverSeed, clientSeed:nonce). The server publishes
+                serverSeed&apos;s hash before you bet, so it can&apos;t change the outcome after
+                seeing your wager. Reveal the seed below to verify any roll yourself, computed right
+                here in your browser.
+              </p>
+
+              {seed && (
+                <dl className="mt-3 space-y-1 text-xs">
+                  <div className="flex justify-between gap-2">
+                    <dt className="shrink-0 font-semibold">Commitment</dt>
+                    <dd className="truncate font-mono" title={seed.serverSeedHash}>
+                      {seed.serverSeedHash.slice(0, 16)}…
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="shrink-0 font-semibold">Client seed</dt>
+                    <dd className="truncate font-mono">{seed.clientSeed}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="shrink-0 font-semibold">Next nonce</dt>
+                    <dd className="font-mono">{seed.nonce}</dd>
+                  </div>
+                </dl>
+              )}
+
+              <input
+                value={customClientSeed}
+                onChange={(e) => setCustomClientSeed(e.target.value)}
+                placeholder="optional: pick your own client seed"
+                className="mt-3 w-full rounded-xl border border-input bg-background px-3 py-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+              <button
+                onClick={rotateSeed}
+                disabled={rotating || !connected}
+                className="mt-2 w-full rounded-full bg-secondary px-4 py-2 text-xs font-bold text-secondary-foreground transition hover:bg-muted disabled:opacity-50"
+              >
+                {rotating ? "Rotating…" : "Reveal seed & start a new one"}
+              </button>
+
+              {revealed && (
+                <div className="mt-4 rounded-xl bg-secondary p-3 text-xs">
+                  <p className="font-semibold">Revealed seed</p>
+                  <p className="mt-1 break-all font-mono">{revealed.serverSeed}</p>
+                  <p className="mt-1 text-muted-foreground">
+                    {revealed.finalNonce} roll{revealed.finalNonce === 1 ? "" : "s"}{" "}
+                    {revealed.finalNonce === 1 ? "was" : "were"} made under it (nonce 0
+                    {revealed.finalNonce > 1 ? `–${revealed.finalNonce - 1}` : ""}).
+                  </p>
+
+                  {verifiableRound &&
+                  verifiableRound.fairness.serverSeedHash === revealed.serverSeedHash ? (
+                    <>
+                      <button
+                        onClick={verify}
+                        disabled={verifying}
+                        className="mt-2 rounded-full bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground transition hover:brightness-105 disabled:opacity-50"
+                      >
+                        {verifying
+                          ? "Verifying…"
+                          : `Verify roll #${verifiableRound.fairness.nonce}`}
+                      </button>
+                      {verifyResult && (
+                        <p
+                          className={`mt-2 font-bold ${verifyResult.ok ? "text-success" : "text-destructive"}`}
+                        >
+                          {verifyResult.ok
+                            ? `✓ Verified — recomputed roll is ${verifyResult.computedRoll}, matching what you were shown.`
+                            : `✗ Mismatch — recomputed roll is ${verifyResult.computedRoll}, which does not match.`}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-2 text-muted-foreground">
+                      No round played under this specific seed to verify yet.
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
         </aside>
       </div>
     </main>
