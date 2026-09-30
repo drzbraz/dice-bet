@@ -5,6 +5,7 @@ import { Die } from "@/components/Die";
 import {
   DiceClient,
   DiceError,
+  fetchClients,
   formatMoney,
   type BetType,
   type ConnectionState,
@@ -48,6 +49,8 @@ type HistoryEntry = {
 function GamePage() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_URL);
   const [clientId, setClientId] = useState("alice");
+  const [clients, setClients] = useState<string[]>([]);
+  const [clientsError, setClientsError] = useState<string | null>(null);
   const [state, setState] = useState<ConnectionState>("idle");
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("EUR");
@@ -59,7 +62,13 @@ function GamePage() {
   const [message, setMessage] = useState<{ tone: "error" | "info"; text: string } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const clientRef = useRef<DiceClient | null>(null);
-  const lastClientIdRef = useRef<string | null>(null);
+  // The player actually sat at the table by the last successful connect,
+  // as opposed to `clientId`, which tracks the select's current value and
+  // can change (e.g. switching players) without a new connect happening
+  // yet. Compared against `clientId` below to tell "Reconnect" (same
+  // player, dropped connection) apart from "Sit at the table" (a
+  // different player was picked, or there's no connection at all).
+  const [seatedClientId, setSeatedClientId] = useState<string | null>(null);
 
   const connected = state === "open";
 
@@ -68,6 +77,25 @@ function GamePage() {
       err instanceof DiceError ? err.message : ((err as Error)?.message ?? "Something went wrong.");
     setMessage({ tone: "error", text });
   }, []);
+
+  // Loads the player picker from the backend, debounced so editing the
+  // "Game server" field doesn't fire a request per keystroke. Clients are
+  // seeded via migration, not created here -- see the README.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchClients(serverUrl)
+        .then((ids) => {
+          setClients(ids);
+          setClientsError(null);
+          setClientId((current) => (ids.includes(current) ? current : (ids[0] ?? "")));
+        })
+        .catch(() => {
+          setClients([]);
+          setClientsError("Couldn't load the player list from that server.");
+        });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [serverUrl]);
 
   const connect = useCallback(async () => {
     setBusy(true);
@@ -80,10 +108,10 @@ function GamePage() {
       await client.connect();
       const trimmedClientId = clientId.trim();
       const wallet = await client.getWallet(trimmedClientId);
-      if (lastClientIdRef.current !== null && lastClientIdRef.current !== trimmedClientId) {
+      if (seatedClientId !== null && seatedClientId !== trimmedClientId) {
         setHistory([]);
       }
-      lastClientIdRef.current = trimmedClientId;
+      setSeatedClientId(trimmedClientId);
       setBalance(wallet.balance);
       setCurrency(wallet.currency || "EUR");
       setPlay(null);
@@ -93,7 +121,7 @@ function GamePage() {
     } finally {
       setBusy(false);
     }
-  }, [clientId, fail, serverUrl]);
+  }, [clientId, fail, seatedClientId, serverUrl]);
 
   useEffect(() => () => clientRef.current?.disconnect(), []);
 
@@ -186,12 +214,22 @@ function GamePage() {
       <section className="card-soft grid gap-4 p-5 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
         <label className="flex flex-col gap-1.5 text-sm font-semibold">
           Player
-          <input
+          <select
             value={clientId}
             onChange={(e) => setClientId(e.target.value)}
-            placeholder="alice"
-            className="rounded-xl border border-input bg-background px-3 py-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
+            disabled={clients.length === 0}
+            className="rounded-xl border border-input bg-background px-3 py-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          >
+            {clients.length === 0 ? (
+              <option value="">{clientsError ?? "Loading players…"}</option>
+            ) : (
+              clients.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))
+            )}
+          </select>
         </label>
         <label className="flex flex-col gap-1.5 text-sm font-semibold">
           Game server
@@ -207,7 +245,7 @@ function GamePage() {
           disabled={busy || !clientId.trim()}
           className="h-10 rounded-xl bg-accent px-5 text-sm font-bold text-accent-foreground transition hover:brightness-105 disabled:opacity-50"
         >
-          {connected ? "Reconnect" : "Sit at the table"}
+          {connected && seatedClientId === clientId ? "Reconnect" : "Sit at the table"}
         </button>
       </section>
 

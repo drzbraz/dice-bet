@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -60,6 +61,17 @@ func (r *memWalletRepo) Update(ctx context.Context, wallet *domain.Wallet) error
 	defer r.store.mu.Unlock()
 	r.store.wallets[wallet.ClientID] = *wallet
 	return nil
+}
+
+func (r *memWalletRepo) ListClientIDs(ctx context.Context) ([]string, error) {
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	ids := make([]string, 0, len(r.store.wallets))
+	for id := range r.store.wallets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 type memPlayRepo struct{ store *memStore }

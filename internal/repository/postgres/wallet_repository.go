@@ -79,3 +79,26 @@ func (r *WalletRepository) Update(ctx context.Context, wallet *domain.Wallet) er
 	}
 	return nil
 }
+
+// ListClientIDs returns every client's ID, ordered alphabetically.
+func (r *WalletRepository) ListClientIDs(ctx context.Context) ([]string, error) {
+	q := querierFromContext(ctx, r.pool)
+	rows, err := q.Query(ctx, `SELECT client_id FROM wallets ORDER BY client_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list client ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan client id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list client ids: %w", err)
+	}
+	return ids, nil
+}

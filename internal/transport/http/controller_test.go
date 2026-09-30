@@ -66,6 +66,41 @@ func TestHTTP_GetWallet_UnknownClientReturns404(t *testing.T) {
 	assert.Equal(t, "CLIENT_NOT_FOUND", resp.Error.Code)
 }
 
+func TestHTTP_ListClients_ReturnsSeededClientIDs(t *testing.T) {
+	router := newTestRouter(nil)
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients", nil, nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Success bool
+		Data    struct {
+			Clients []string
+		}
+	}
+	decodeBody(t, rec, &resp)
+	assert.True(t, resp.Success)
+	assert.Equal(t, []string{"alice"}, resp.Data.Clients)
+}
+
+func TestHTTP_CORS_AllowsCrossOriginGET(t *testing.T) {
+	router := newTestRouter(nil)
+
+	rec := doRequest(t, router, http.MethodGet, "/api/v1/clients", nil, nil)
+
+	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestHTTP_CORS_HandlesPreflight(t *testing.T) {
+	router := newTestRouter(nil)
+
+	rec := doRequest(t, router, http.MethodOptions, "/api/v1/plays", nil, nil)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "Idempotency-Key")
+}
+
 func TestHTTP_PostPlay_Success(t *testing.T) {
 	router := newTestRouter(nil)
 

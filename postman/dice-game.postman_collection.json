@@ -33,6 +33,37 @@
       "name": "Happy Path",
       "item": [
         {
+          "name": "0. Clients - List All",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "clients"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('has data.clients as a non-empty array', () => {",
+                  "    pm.expect(body.data.clients).to.be.an('array');",
+                  "    pm.expect(body.data.clients.length).to.be.greaterThan(0);",
+                  "});",
+                  "pm.test('clientId collection variable is one of the listed clients', () => {",
+                  "    pm.expect(body.data.clients).to.include(pm.collectionVariables.get('clientId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "1. Wallet - Get Balance",
           "request": {
             "method": "GET",

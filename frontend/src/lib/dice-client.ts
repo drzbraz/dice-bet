@@ -192,3 +192,28 @@ export class DiceClient {
 /** Money is int64 minor units (cents) on the backend. */
 export const formatMoney = (cents: number, currency = "EUR") =>
   new Intl.NumberFormat("en-IE", { style: "currency", currency }).format(cents / 100);
+
+/**
+ * Derives the backend's HTTP base URL from its WebSocket URL
+ * (ws(s)://host[:port]/ws -> http(s)://host[:port]), since both transports
+ * are served by the same Go process on the same port (see README "HTTP
+ * mirror"). Used only to fetch the player list for the picker below; the
+ * game itself is played entirely over the WebSocket in DiceClient.
+ */
+function httpBaseFromWsUrl(wsUrl: string): string {
+  return wsUrl.replace(/^ws/, "http").replace(/\/ws\/?$/, "");
+}
+
+/**
+ * Fetches every known client ID via GET /api/v1/clients, to populate a
+ * player picker. There is no "create client" endpoint in this project --
+ * see the README's "Frontend" section for how to add one.
+ */
+export async function fetchClients(wsUrl: string): Promise<string[]> {
+  const res = await fetch(`${httpBaseFromWsUrl(wsUrl)}/api/v1/clients`);
+  if (!res.ok) {
+    throw new DiceError("CONNECTION_FAILED", `Could not load the player list (HTTP ${res.status}).`);
+  }
+  const body = (await res.json()) as { data?: { clients?: string[] } };
+  return body.data?.clients ?? [];
+}

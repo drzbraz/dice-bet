@@ -2,6 +2,8 @@
 
 A production-quality Go backend for a dice game where a player bets whether the next roll is `EVEN` or `ODD`. Built for a technical assessment; graded on architecture, concurrency correctness, error handling, and tests rather than feature count.
 
+**Contents**: [Overview](#overview) · [Architecture](#architecture) · [Read freshness under replica lag](#read-freshness-under-replica-lag-wallet-balance-cache) · [Domain state machine](#domain-state-machine-play) · [WebSocket contract](#websocket-contract) · [HTTP mirror](#http-mirror-for-postman) · [Prerequisites](#prerequisites) · [How to run](#how-to-run) · [Frontend](#frontend) · [How to add a new client](#how-to-add-a-new-client) · [How to test](#how-to-test) · [Assumptions and trade-offs](#assumptions-and-trade-offs) · [What would change for production](#what-would-change-for-production) · [Configuration](#configuration)
+
 ## Overview
 
 - A die (1–6) is rolled server-side using `crypto/rand` behind an injectable `DiceRoller` interface.
@@ -233,10 +235,21 @@ Endpoint: `ws://localhost:8080/ws`. JSON text frames.
 
 Same use cases, same services/DTOs — this also demonstrates the business layer is transport-agnostic.
 
+- `GET  /api/v1/clients` — `{ "clients": ["alice", "bob", ...] }`, every known client ID, alphabetically. Not part of the WebSocket contract; added purely to populate the frontend's player picker (see "Frontend" below). There is no client-creation endpoint anywhere in this project — see [How to add a new client](#how-to-add-a-new-client).
 - `GET  /api/v1/clients/{clientId}/wallet`
 - `POST /api/v1/plays` — body `{ "clientId", "betAmount", "betType" }`, header `Idempotency-Key` (required)
 - `POST /api/v1/plays/end` — body `{ "clientId" }`, header `Idempotency-Key` (required)
 - `GET  /health` — checks database connectivity via `pool.Ping`
+
+This mirror sends a permissive `Access-Control-Allow-Origin: *` (see `withCORS` in `internal/transport/http/router.go`), since the frontend fetches `GET /api/v1/clients` directly from its own origin. Safe here because the mirror is already auth-less by design (an explicit assessment-scope simplification, not specific to this endpoint — see "Assumptions and trade-offs"); a production deployment would restrict it to the frontend's actual origin(s).
+
+## Prerequisites
+
+- **Docker + Docker Compose** — the only requirement for the "with Docker" path below; it builds and runs everything, no local Go toolchain needed.
+- **Go 1.25+** — only if running the server locally against a Postgres you already have.
+- **A local Docker daemon** — only for `make test-integration` (testcontainers spins up a real, disposable Postgres).
+- **Node 18+ / npm** — only for the optional `frontend/`.
+- **`golangci-lint`** — only for `make lint` (`go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`).
 
 ## How to run
 
@@ -259,7 +272,7 @@ make run                # loads .env, applies migrations (RUN_MIGRATIONS=true by
 
 ## Frontend
 
-`frontend/` is a friendly React/TanStack Start client for this backend (originally scaffolded with [Lovable](https://lovable.dev), now a normal part of this repo — see `frontend/README.md`/`frontend/AGENTS.md` for what it still carries over from that). It talks to the backend purely over the WebSocket contract above.
+`frontend/` is a friendly React/TanStack Start client for this backend (originally scaffolded with [Lovable](https://lovable.dev), now a normal part of this repo — see `frontend/README.md`/`frontend/AGENTS.md` for what it still carries over from that). Gameplay (wallet lookups, `play.start`, `play.end`) goes purely over the WebSocket contract above; the "Player" field is the one exception, a `<select>` populated by fetching `GET /api/v1/clients` from the HTTP mirror when the page loads or the "Game server" field changes (`frontend/src/lib/dice-client.ts`'s `fetchClients`).
 
 ```sh
 cd frontend
@@ -269,6 +282,15 @@ npm run dev   # http://localhost:5173
 
 The dev server defaults to `:5173` specifically so it doesn't collide with the backend's own default `:8080` (see `frontend/vite.config.ts`) — both can run side by side locally. The UI's "Game server" field lets you point it at any backend URL at runtime; its build-time default is `ws://localhost:8080/ws`, overridable via `VITE_DICE_SERVER_URL` (see `frontend/.env.example`) for pointing a deployed build at a deployed backend.
 
+### How to add a new client
+
+There is no "create client" API, on either transport, anywhere in this project — the player picker only ever shows whoever already exists. To add one:
+
+- **Preferred**: add a migration, following the pattern in `migrations/000002_seed_clients.up.sql` (insert into both `clients` and `wallets` — see the [ER diagram](#entity-relationship-diagram) for why both rows are needed).
+- **Quick/local**: insert directly against the database, e.g. `psql postgres://dicebet:dicebet@localhost:5433/dicebet -c "INSERT INTO clients (id) VALUES ('erin'); INSERT INTO wallets (client_id, balance, currency) VALUES ('erin', 10000, 'EUR');"` (host port `5433`, per "How to run" above).
+
+Either way, the new client shows up in the picker on the next page load / "Game server" edit — no restart needed, since `GET /api/v1/clients` reads the table live.
+
 ## How to test
 
 ```sh
@@ -276,13 +298,14 @@ make test-unit         # go test -short -race ./...        — no Docker require
 make test-integration   # go test -race ./internal/repository/postgres/... ./test/e2e/...  — requires a local Docker daemon (testcontainers)
 make test               # everything, with -race
 make cover               # coverage.html
+make lint                # golangci-lint run
 ```
 
 - **Domain** (`internal/domain`): `IsWin` for all 6 faces × both bet types, payout math, `Wallet.Debit`/`Credit` invariants including int64 overflow — 100% coverage.
 - **Service** (`internal/service`, in-memory fakes + a fake `TxManager` that snapshots/restores state to simulate real rollback): every protection rule, win/loss happy paths, `EndPlay` credits 0 on a loss, calling `EndPlay` twice never double-credits, idempotent replay returns the identical response with zero side effects, the idempotency-conflict retry path, repository failures propagating as `INTERNAL_ERROR`, rollback on a mid-transaction failure — 86% coverage.
 - **Repository integration** (`internal/repository/postgres`, testcontainers): CRUD, `FOR UPDATE` row-lock blocking behavior (proven by racing two transactions), the partial unique index rejecting a second OPEN play, the balance check constraint, ledger uniqueness, Postgres error → domain error mapping.
 - **Concurrency** (`test/e2e`, real Postgres, `-race`): 20 goroutines firing `Play` for the same client — exactly one succeeds, the other 19 get `PLAY_ALREADY_IN_PROGRESS`, and the balance/ledger reflect exactly one debit. Same pattern for `EndPlay` (credited exactly once).
-- **Transport**: WebSocket integration tests via `httptest.Server` + a real `gorilla/websocket` client (full flow, malformed JSON, unknown type, oversized message, connection stays open after a recoverable error, graceful `Shutdown`). HTTP handler tests via `httptest.ResponseRecorder` covering every status code mapping.
+- **Transport**: WebSocket integration tests via `httptest.Server` + a real `gorilla/websocket` client (full flow, malformed JSON, unknown type, oversized message, connection stays open after a recoverable error, graceful `Shutdown`). HTTP handler tests via `httptest.ResponseRecorder` covering every status code mapping, `GET /api/v1/clients`, and the CORS preflight/header behavior described above.
 
 ### Testing the WebSocket endpoint manually
 
@@ -307,7 +330,7 @@ websocat ws://localhost:8080/ws
 
 ### Postman collection
 
-`postman/dice-game.postman_collection.json` — import it, set the `baseUrl` and `clientId` collection variables (defaults: `http://localhost:8080`, `alice`), run the **Happy Path** folder (Wallet → Play → EndPlay → Wallet, with assertions on status/schema/balance math) and the **Protections** folder (bet above balance, zero/negative bet, invalid bet type, play while one is open, end play with none open, unknown client, replayed idempotency key). A pre-request script generates a fresh UUID `Idempotency-Key` for every request.
+`postman/dice-game.postman_collection.json` — import it, set the `baseUrl` and `clientId` collection variables (defaults: `http://localhost:8080`, `alice`), run the **Happy Path** folder (Clients → Wallet → Play → EndPlay → Wallet, with assertions on status/schema/balance math) and the **Protections** folder (bet above balance, zero/negative bet, invalid bet type, play while one is open, end play with none open, unknown client, replayed idempotency key). A pre-request script generates a fresh UUID `Idempotency-Key` for every request.
 
 ## Assumptions and trade-offs
 

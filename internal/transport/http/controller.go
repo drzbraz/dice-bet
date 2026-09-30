@@ -40,6 +40,19 @@ func (c *Controller) GetWallet(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, "wallet.get.result", "", dto.NewWalletGetResponse(balance))
 }
 
+// ListClients implements GET /api/v1/clients. There is no client-creation
+// endpoint: this lists whoever was seeded via migration or inserted
+// directly against the database (see README "How to run"), primarily to
+// populate a player picker in a UI.
+func (c *Controller) ListClients(w http.ResponseWriter, r *http.Request) {
+	ids, err := c.wallet.ListClients(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeSuccess(w, "clients.list.result", "", dto.NewClientsListResponse(ids))
+}
+
 // PostPlay implements POST /api/v1/plays.
 func (c *Controller) PostPlay(w http.ResponseWriter, r *http.Request) {
 	requestID, ok := requireIdempotencyKey(w, r)

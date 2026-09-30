@@ -26,6 +26,11 @@ type WalletRepository interface {
 	// defense-in-depth path since the domain layer already validates
 	// balance before calling Update.
 	Update(ctx context.Context, wallet *domain.Wallet) error
+	// ListClientIDs returns every client's ID, ordered alphabetically.
+	// Clients are seeded via migration (see migrations/000002) rather than
+	// created by any API in this project, so this is a plain read with no
+	// pagination: the seed set is small and fixed by design.
+	ListClientIDs(ctx context.Context) ([]string, error)
 }
 
 // PlayRepository persists and retrieves plays.

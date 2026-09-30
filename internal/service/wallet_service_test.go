@@ -63,3 +63,29 @@ func TestWalletService_GetBalance_MissPopulatesCacheForNextRead(t *testing.T) {
 	assert.Equal(t, int64(12345), balance)
 	assert.Equal(t, "EUR", currency)
 }
+
+func TestWalletService_ListClients_ReturnsAllClientIDsSorted(t *testing.T) {
+	h := newTestHarness(100, 10000)
+	h.seedWallet("carol", 100)
+	h.seedWallet("alice", 200)
+	h.seedWallet("bob", 300)
+
+	ids, err := h.wallet.ListClients(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob", "carol"}, ids)
+}
+
+func TestWalletService_ListClients_EmptyWhenNoClientsSeeded(t *testing.T) {
+	h := newTestHarness(100, 10000)
+
+	ids, err := h.wallet.ListClients(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+func TestWalletService_ListClients_RepositoryErrorPropagatesAsInternal(t *testing.T) {
+	svc := NewWalletService(&failingWalletRepository{err: errors.New("db down")}, cache.NewMemoryCache(time.Minute))
+
+	_, err := svc.ListClients(context.Background())
+	requireDomainErr(t, err, domain.ErrCodeInternal)
+}

@@ -58,3 +58,16 @@ func (s *WalletService) GetBalance(ctx context.Context, clientID string) (*Walle
 		Currency: wallet.Currency,
 	}, nil
 }
+
+// ListClients returns every known client ID. There is no create-client use
+// case in this project: clients are seeded via migration (see
+// migrations/000002_seed_clients.up.sql) or inserted directly against the
+// database, so this is a thin, uncached read used to populate a player
+// picker rather than a full account-management endpoint.
+func (s *WalletService) ListClients(ctx context.Context) ([]string, error) {
+	ids, err := s.wallets.ListClientIDs(ctx)
+	if err != nil {
+		return nil, wrapRepoErr(err)
+	}
+	return ids, nil
+}

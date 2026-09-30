@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -104,6 +105,17 @@ func (r *fakeWalletRepository) Update(ctx context.Context, wallet *domain.Wallet
 	defer r.store.mu.Unlock()
 	r.store.wallets[wallet.ClientID] = *wallet
 	return nil
+}
+
+func (r *fakeWalletRepository) ListClientIDs(ctx context.Context) ([]string, error) {
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	ids := make([]string, 0, len(r.store.wallets))
+	for id := range r.store.wallets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 type fakePlayRepository struct{ store *fakeStore }
@@ -235,6 +247,9 @@ func (r *failingWalletRepository) Get(ctx context.Context, clientID string) (*do
 }
 func (r *failingWalletRepository) Update(ctx context.Context, wallet *domain.Wallet) error {
 	return r.err
+}
+func (r *failingWalletRepository) ListClientIDs(ctx context.Context) ([]string, error) {
+	return nil, r.err
 }
 
 // erroringIdempotencyRepository always fails, to test that idempotency

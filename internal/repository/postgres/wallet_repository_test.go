@@ -136,3 +136,26 @@ func TestWalletRepository_GetForUpdate_LocksRowUntilCommit(t *testing.T) {
 		t.Fatal("expected second GetForUpdate to unblock once the first transaction committed")
 	}
 }
+
+func TestWalletRepository_ListClientIDs_ReturnsAllSeededClientsSorted(t *testing.T) {
+	pool := setupTestPool(t)
+	truncateAll(t, pool)
+	seedClient(t, pool, "carol", 100)
+	seedClient(t, pool, "alice", 200)
+	seedClient(t, pool, "bob", 300)
+	repo := NewWalletRepository(pool)
+
+	ids, err := repo.ListClientIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob", "carol"}, ids)
+}
+
+func TestWalletRepository_ListClientIDs_EmptyWhenNoClients(t *testing.T) {
+	pool := setupTestPool(t)
+	truncateAll(t, pool)
+	repo := NewWalletRepository(pool)
+
+	ids, err := repo.ListClientIDs(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}

@@ -34,3 +34,13 @@ func NewWalletGetResponse(b *service.WalletBalance) WalletGetResponse {
 		Currency: b.Currency,
 	}
 }
+
+// ClientsListResponse is the payload for GET /api/v1/clients.
+type ClientsListResponse struct {
+	Clients []string `json:"clients"`
+}
+
+// NewClientsListResponse wraps a list of client IDs in its wire DTO.
+func NewClientsListResponse(ids []string) ClientsListResponse {
+	return ClientsListResponse{Clients: ids}
+}
